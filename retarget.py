@@ -385,11 +385,16 @@ def bake_retargeted_animation(
             frame_end=frame_end,
             only_selected=False,
             visual_keying=True,
-            clear_constraints=True,
+            clear_constraints=False,
             clear_parents=False,
             use_current_action=True,
             bake_types={'POSE'},
         )
+
+        # Keep facial, control-rig, and user-authored constraints intact.
+        # NLA bake's clear_constraints option removes every constraint on the
+        # selected bones, not just the ones created by Kimodo.
+        remove_retargeting_constraints(target_arm)
 
         bpy.ops.object.mode_set(mode='OBJECT')
         return True

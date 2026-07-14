@@ -49,6 +49,11 @@ def _run_profile(source, presets, retarget, profile_id, name, offset, bake=False
     target_names = {item["tgt"] for item in profile["mappings"]}
     target_names.update(profile["markers"])
     target = _create_target(name, target_names, offset)
+    preserved_constraint = None
+    if bake:
+        preserved_bone = target.pose.bones.get("spine_05") or target.pose.bones[0]
+        preserved_constraint = preserved_bone.constraints.new("LIMIT_ROTATION")
+        preserved_constraint.name = "USER_KEEP_ME"
 
     settings = bpy.context.scene.kimodo
     settings.source_armature = source
@@ -133,6 +138,15 @@ def _run_profile(source, presets, retarget, profile_id, name, offset, bake=False
     else:
         retarget.remove_retargeting_constraints(target)
 
+    user_constraint_preserved = (
+        preserved_constraint is None
+        or any(
+            constraint.name == "USER_KEEP_ME"
+            for bone in target.pose.bones
+            for constraint in bone.constraints
+        )
+    )
+
     root_mode = next(
         item.retarget_mode
         for item in settings.bone_mappings
@@ -158,6 +172,7 @@ def _run_profile(source, presets, retarget, profile_id, name, offset, bake=False
         "remaining_constraints": remaining_constraints,
         "has_baked_action": target.animation_data is not None
         and target.animation_data.action is not None,
+        "user_constraint_preserved": user_constraint_preserved,
     }
 
 
@@ -216,6 +231,7 @@ def main():
     assert ue5["bake_result"] == ["FINISHED"]
     assert ue5["remaining_constraints"] == 0
     assert ue5["has_baked_action"]
+    assert ue5["user_constraint_preserved"]
 
     print("KIMODO_RETARGET_SMOKE=" + json.dumps(payload, sort_keys=True))
 

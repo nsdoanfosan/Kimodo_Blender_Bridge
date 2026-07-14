@@ -428,6 +428,17 @@ class KIMODO_SceneSettings(PropertyGroup):
     )
     bake_start_frame: IntProperty(name="Start Frame", default=1, min=0)
     bake_end_frame: IntProperty(name="End Frame", default=250, min=1)
+    iclone_last_export_path: StringProperty(
+        name="Last iClone Export",
+        description="Last FBX motion file exported for iClone",
+        default="",
+        subtype='FILE_PATH',
+    )
+    iclone_export_status: StringProperty(
+        name="iClone Export Status",
+        description="Last standalone iClone motion export result",
+        default="",
+    )
 
     # --- Motion Constraints ---
     motion_constraints: CollectionProperty(type=KIMODO_ConstraintItem)

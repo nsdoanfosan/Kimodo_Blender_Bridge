@@ -13,9 +13,11 @@ import random
 import time
 from bpy.types import Operator
 from bpy.props import StringProperty, BoolProperty, IntProperty
+from bpy_extras.io_utils import ExportHelper
 
 from . import subprocess_client as sc
 from . import retarget as rt
+from . import iclone_motion_export as icexport
 from . import constraints as cmod
 from . import setup_operator as so
 
@@ -777,6 +779,55 @@ class KIMODO_OT_BakeRetargeting(Operator):
         else:
             self.report({'ERROR'}, "Bake failed — check console for details")
         return {'FINISHED'} if success else {'CANCELLED'}
+
+
+class KIMODO_OT_ExportICloneMotion(Operator, ExportHelper):
+    """Export the active Kimodo Action for iClone without Data Link"""
+    bl_idname = "kimodo.export_iclone_motion"
+    bl_label = "Export iClone Motion"
+
+    filename_ext = ".fbx"
+    filter_glob: StringProperty(default="*.fbx", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        settings = context.scene.kimodo
+        source = settings.source_armature
+        state = icexport.inspect_source(source)
+        name = bpy.path.clean_name(state["action"] or "Kimodo_Motion")
+        previous = settings.iclone_last_export_path
+        if previous:
+            directory = os.path.dirname(previous)
+        elif settings.last_bvh_path:
+            directory = os.path.dirname(settings.last_bvh_path)
+        else:
+            directory = bpy.path.abspath("//")
+        self.filepath = os.path.join(directory, name + self.filename_ext)
+        return ExportHelper.invoke(self, context, event)
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            result = icexport.export_motion(
+                settings.source_armature,
+                self.filepath,
+            )
+        except icexport.ICloneMotionExportError as exc:
+            settings.iclone_export_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        except Exception as exc:
+            message = f"iClone motion export failed: {exc}"
+            settings.iclone_export_status = message
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+        settings.iclone_last_export_path = result["fbx_path"]
+        settings.iclone_export_status = (
+            f"Exported {result['action']} ({result['frame_start']}-"
+            f"{result['frame_end']}, {result['mapped_bones']} mapped bones)"
+        )
+        self.report({'INFO'}, settings.iclone_export_status)
+        return {'FINISHED'}
 
 
 # ---------------------------------------------------------------------------
@@ -2300,6 +2351,7 @@ _classes = [
     KIMODO_OT_ApplyRetargeting,
     KIMODO_OT_RemoveRetargeting,
     KIMODO_OT_BakeRetargeting,
+    KIMODO_OT_ExportICloneMotion,
     KIMODO_OT_SavePreset,
     KIMODO_OT_LoadPreset,
     KIMODO_OT_DeletePreset,

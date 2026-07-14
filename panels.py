@@ -801,6 +801,55 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
 
         layout.separator()
 
+        # Standalone iClone external-motion export. No character, Rigify,
+        # Data Link, or Reallusion Blender add-on is required.
+        ic_box = layout.box()
+        ic_box.label(text="iClone Motion Export", icon='EXPORT')
+        ic_box.label(text="No Data Link or target character required", icon='CHECKMARK')
+        try:
+            from . import iclone_motion_export as icexport
+            ic_state = icexport.inspect_source(s.source_armature)
+        except Exception:
+            ic_state = {"ready": False, "action": "", "missing_required": []}
+
+        if s.source_armature:
+            if ic_state.get("action"):
+                ic_box.label(text=f"Action: {ic_state['action']}", icon='ACTION')
+                ic_box.label(
+                    text=(
+                        f"Frames: {ic_state['frame_start']}-{ic_state['frame_end']} | "
+                        f"HIK bones: {ic_state['mapped_bones']}"
+                    )
+                )
+            else:
+                ic_box.label(text="Source has no active Action", icon='ERROR')
+            if ic_state.get("missing_required"):
+                _label_wrapped(
+                    ic_box,
+                    "Missing SOMA bones: " + ", ".join(ic_state["missing_required"]),
+                    context,
+                    icon='ERROR',
+                )
+        else:
+            ic_box.label(text="Choose Source (Kimodo) above", icon='INFO')
+
+        export_col = ic_box.column()
+        export_col.enabled = bool(ic_state.get("ready"))
+        export_col.operator(
+            "kimodo.export_iclone_motion",
+            text="Export FBX + 3DX Profile",
+            icon='EXPORT',
+        )
+        ic_box.label(text="iClone: File > Import > Import External Motion")
+        ic_box.label(text="Load the companion .3dxProfile; Root Bone: Root")
+
+        if s.iclone_last_export_path:
+            _label_wrapped(ic_box, s.iclone_last_export_path, context, icon='FILE')
+        if s.iclone_export_status:
+            _label_wrapped(ic_box, s.iclone_export_status, context, icon='INFO')
+
+        layout.separator()
+
         # Presets
         box = layout.box()
         box.label(text="Bone Map Presets", icon='PRESET')

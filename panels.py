@@ -805,7 +805,7 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         # use Reallusion's official Data Link sequence transfer.
         live_box = layout.box()
         live_box.label(text="iClone Official Data Link", icon='PLAY')
-        live_box.label(text="Use an imported CC armature as Target")
+        live_box.label(text="Select one avatar in iClone; target import is automatic")
         try:
             from . import iclone_live_send as icsend
             live_state = icsend.inspect_source(s.source_armature)
@@ -827,16 +827,14 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
                 icon='ERROR',
             )
 
-        row = live_box.row(align=True)
-        row.operator("kimodo.check_iclone_receiver", text="Check iClone", icon='FILE_REFRESH')
-        send_col = row.column()
+        send_col = live_box.column()
         send_col.enabled = bool(live_state.get("ready"))
         send_col.operator(
             "kimodo.send_motion_to_iclone",
             text="Send Motion to iClone",
             icon='PLAY',
         )
-        live_box.label(text="Blender CC retarget -> official iClone Motion Clip")
+        live_box.label(text="One click: connect -> CC retarget -> Motion Clip")
         if s.iclone_live_status:
             _label_wrapped(live_box, s.iclone_live_status, context, icon='INFO')
 

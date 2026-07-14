@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.7.0] - 2026-07-14
+
+### Added
+
+- **One-click iClone handoff**: `Send Motion to iClone` now starts the forked official Data Link, requests the one avatar selected in iClone when its CC rig is not already in Blender, retargets the active Kimodo Action, and sends one official animation sequence.
+- **Coordinated official forks**: The workflow uses the paired `nsdoanfosan/cc_blender_tools` and `nsdoanfosan/CCiC-Blender-Pipeline-Plugin` forks based on upstream 2.4.2.
+
+### Changed
+
+- The primary UI no longer requires the legacy Kimodo receiver check before sending.
+
 ## [1.6.1] - 2026-07-14
 
 ### Changed

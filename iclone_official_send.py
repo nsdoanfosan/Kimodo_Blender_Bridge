@@ -16,7 +16,10 @@ class ICloneOfficialSendError(RuntimeError):
 
 def _official_modules():
     addon_key = next(
-        (key for key in bpy.context.preferences.addons if key.startswith("cc_blender_tools")),
+        (
+            key for key in bpy.context.preferences.addons.keys()
+            if key.startswith("cc_blender_tools")
+        ),
         None,
     )
     if not addon_key:
@@ -25,6 +28,7 @@ def _official_modules():
         return (
             importlib.import_module(addon_key + ".link"),
             importlib.import_module(addon_key + ".vars"),
+            importlib.import_module(addon_key + ".kimodo_integration"),
         )
     except Exception as exc:
         raise ICloneOfficialSendError("Reallusion Data Link modules could not be loaded") from exc
@@ -53,6 +57,41 @@ def find_cc_target(source, preferred=None):
             "Import the selected iClone character with Reallusion Data Link first"
         )
     raise ICloneOfficialSendError("Choose the imported CC armature as Target")
+
+
+def find_available_target(source, preferred=None):
+    """Find a reusable CC target without requiring a manual import first."""
+    if preferred is not source and _is_cc_armature(preferred):
+        return preferred
+    candidates = [
+        obj for obj in bpy.context.scene.objects
+        if obj is not source and _is_cc_armature(obj)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def begin_one_click_session():
+    """Start Data Link and clear any previous automatic target request."""
+    _link, _vars_module, integration = _official_modules()
+    integration.reset_request()
+    integration.start_link()
+
+
+def is_link_connected():
+    _link, _vars_module, integration = _official_modules()
+    return integration.is_connected()
+
+
+def request_selected_iclone_target():
+    _link, _vars_module, integration = _official_modules()
+    integration.request_selected_avatar()
+
+
+def requested_target_state():
+    _link, _vars_module, integration = _official_modules()
+    state = integration.request_state()
+    state["target"] = integration.find_requested_target()
+    return state
 
 
 def _mapping(source, target):
@@ -184,7 +223,7 @@ def retarget_action(source, target):
 
 
 def send_motion(source, preferred_target=None):
-    link, vars_module = _official_modules()
+    link, vars_module, _integration = _official_modules()
     service = link.LINK_SERVICE
     if not service or not service.is_connected:
         raise ICloneOfficialSendError("Start Reallusion Data Link in iClone and Blender")

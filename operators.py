@@ -807,34 +807,110 @@ class KIMODO_OT_CheckICloneReceiver(Operator):
 
 
 class KIMODO_OT_SendMotionToIClone(Operator):
-    """Retarget onto an imported CC rig and send through Reallusion Data Link"""
+    """Prepare the selected iClone target and send one Kimodo Motion Clip"""
     bl_idname = "kimodo.send_motion_to_iclone"
     bl_label = "Send Motion to iClone"
 
-    def execute(self, context):
-        settings = context.scene.kimodo
-        try:
-            result = icofficial.send_motion(
-                settings.source_armature,
-                settings.target_armature,
-            )
-        except icofficial.ICloneOfficialSendError as exc:
-            settings.iclone_live_status = str(exc)
-            self.report({'ERROR'}, str(exc))
-            return {'CANCELLED'}
-        except Exception as exc:
-            message = f"iClone live transfer failed: {exc}"
-            settings.iclone_live_status = message
-            self.report({'ERROR'}, message)
-            return {'CANCELLED'}
+    _timer = None
+    _started_at = 0.0
+    _request_sent = False
+    _source = None
+    _preferred_target = None
 
+    def _finish_timer(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+
+    def _fail(self, context, message):
+        self._finish_timer(context)
+        context.scene.kimodo.iclone_live_status = message
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+    def _advance(self, context):
+        settings = context.scene.kimodo
+        if not icofficial.is_link_connected():
+            settings.iclone_live_status = "Starting official Data Link..."
+            return None
+
+        target = icofficial.find_available_target(
+            self._source,
+            self._preferred_target,
+        )
+        if target is None:
+            if not self._request_sent:
+                icofficial.request_selected_iclone_target()
+                self._request_sent = True
+                settings.iclone_live_status = (
+                    "Requesting the selected iClone avatar through Data Link..."
+                )
+                return None
+            request = icofficial.requested_target_state()
+            if request["error"]:
+                raise icofficial.ICloneOfficialSendError(request["error"])
+            target = request["target"]
+            if target is None:
+                name = request["target_name"] or "selected avatar"
+                settings.iclone_live_status = f"Importing {name} from iClone..."
+                return None
+
+        settings.target_armature = target
+        result = icofficial.send_motion(self._source, target)
         settings.iclone_live_target = result["target"]
         settings.iclone_live_status = (
             f"Official Data Link: {result['action']} to {result['target']}: "
             f"{result['source_frames']} frames, {result['mapped_bones']} bones"
         )
+        self._finish_timer(context)
         self.report({'INFO'}, settings.iclone_live_status)
         return {'FINISHED'}
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        self._source = settings.source_armature
+        self._preferred_target = settings.target_armature
+        self._request_sent = False
+        self._started_at = time.monotonic()
+        try:
+            if not self._source or self._source.type != 'ARMATURE':
+                raise icofficial.ICloneOfficialSendError(
+                    "Choose the animated Kimodo source armature"
+                )
+            if not self._source.animation_data or not self._source.animation_data.action:
+                raise icofficial.ICloneOfficialSendError(
+                    "The Kimodo source has no active Action"
+                )
+            icofficial.begin_one_click_session()
+            immediate = self._advance(context)
+            if immediate is not None:
+                return immediate
+        except icofficial.ICloneOfficialSendError as exc:
+            return self._fail(context, str(exc))
+        except Exception as exc:
+            return self._fail(context, f"iClone transfer failed: {exc}")
+
+        self._timer = context.window_manager.event_timer_add(
+            0.25,
+            window=context.window,
+        )
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            return self._fail(context, "iClone transfer cancelled")
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        if time.monotonic() - self._started_at > 300.0:
+            return self._fail(context, "Timed out waiting for iClone Data Link")
+        try:
+            result = self._advance(context)
+            return result if result is not None else {'RUNNING_MODAL'}
+        except icofficial.ICloneOfficialSendError as exc:
+            return self._fail(context, str(exc))
+        except Exception as exc:
+            return self._fail(context, f"iClone transfer failed: {exc}")
 
 
 class KIMODO_OT_ExportICloneMotion(Operator, ExportHelper):

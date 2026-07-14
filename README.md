@@ -156,10 +156,15 @@ The iClone character is imported into Blender once, so Kimodo is retargeted on
 the character's actual 101-bone CC skeleton before Reallusion creates the
 iClone Motion Clip.
 
-1. Start **Blender Pipeline / Data Link** in iClone and Blender.
-2. Select the iClone character and send it to Blender with the official plugin.
-3. In Blender **Retarget**, choose Kimodo as **Source** and the imported CC rig as **Target**.
+1. Install the paired Kimodo integration forks of the official Blender and iClone tools.
+2. In iClone, select exactly one avatar.
+3. In Blender **Retarget**, choose the animated Kimodo rig as **Source**.
 4. Click **Send Motion to iClone**.
+
+The button starts Data Link automatically. If the selected iClone avatar is not
+already present in Blender, the paired plug-ins transfer and import its CC rig
+first. The add-on then bakes the active Kimodo Action and sends one official
+animation sequence without a separate receiver check.
 
 The add-on bakes the complete Kimodo Action onto the CC rig, including root
 translation, then asks the official Data Link to send the 30 fps animation

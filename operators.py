@@ -625,7 +625,7 @@ class KIMODO_OT_ImportBVH(Operator):
 # ---------------------------------------------------------------------------
 
 class KIMODO_OT_AutoMapBones(Operator):
-    """Auto-match bone names between Kimodo source and target armature"""
+    """Build a target-profile mapping, then fall back to name heuristics"""
     bl_idname = "kimodo.auto_map_bones"
     bl_label = "Auto-Match Bones"
 
@@ -638,16 +638,45 @@ class KIMODO_OT_AutoMapBones(Operator):
             self.report({'ERROR'}, "Set the Target Armature first.")
             return {'CANCELLED'}
 
-        pairs = rt.auto_build_mapping(s.source_armature, s.target_armature, s.model_type)
+        profile_result = rt.build_profile_mapping(
+            s.source_armature,
+            s.target_armature,
+            s.retarget_profile,
+        )
         s.bone_mappings.clear()
 
+        if profile_result["mappings"]:
+            for pair in profile_result["mappings"]:
+                item = s.bone_mappings.add()
+                item.source_bone = pair["src"]
+                item.target_bone = pair["tgt"]
+                item.enabled = True
+                item.retarget_mode = pair["mode"]
+                item.inherit_rotation = pair["inherit_rot"]
+            s.retarget_root_bone = profile_result["root"]
+            missing = len(profile_result["missing_target"])
+            suffix = f"; {missing} optional target bones absent" if missing else ""
+            self.report({"INFO"}, (
+                f"Built {profile_result['label']} mapping: "
+                f"{len(profile_result['mappings'])} pairs{suffix}"
+            ))
+            return {'FINISHED'}
+
+        if s.retarget_profile != "AUTO":
+            self.report({'ERROR'}, "The selected target profile has no compatible bone pairs.")
+            return {'CANCELLED'}
+
+        pairs = rt.auto_build_mapping(s.source_armature, s.target_armature, s.model_type)
         for src, tgt in pairs:
             item = s.bone_mappings.add()
             item.source_bone = src
             item.target_bone = tgt
             item.enabled = True
+            item.retarget_mode = (
+                "CHILD_OF" if src == "Root" else "CHILD_OF_ROTATION"
+            )
 
-        self.report({'INFO'}, f"Auto-matched {len(pairs)} bone pairs")
+        self.report({'INFO'}, f"No official profile detected; heuristically matched {len(pairs)} pairs")
         return {'FINISHED'}
 
 

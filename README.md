@@ -125,13 +125,29 @@ After generating motion you can drive any armature from the Kimodo source:
 
 1. Open the **Retarget** panel.
 2. Set **Source** to `Kimodo_Source` and **Target** to your character rig.
-3. Click **Auto-Match Bones** — the addon fuzzy-matches Kimodo bone names against your rig.
+3. Choose **Auto Detect**, **Unreal UE5**, or **Reallusion CC / iClone**, then click **Build Profile Mapping**.
 4. Review the mapping, enable/disable pairs, choose a retarget mode per bone. Its recommended to also adjust the scale of the armature to match your character and then applying it with CTRL+A.
 5. Choose the type of constraint the plugin should use, "Child of", "Copy Rotation" etc...
 6. Click **Apply Constraints** — Blender constraint drivers are added to your rig.
 7. Click **Bake & Remove Constraints** when you are happy — keyframes are baked onto your rig and all Kimodo constraints are removed, leaving a clean, self-contained animation.
 
 Use **Save / Load Preset** to store bone mappings for a rig and reuse them later.
+
+The built-in Unreal profile targets the **UE5 Manny hierarchy** (`root`, `pelvis`,
+`spine_01`...`spine_05`) and also supports Reallusion characters exported with
+**Unreal (UE5 Skeleton)**. The native Reallusion profile targets the
+`CC_Base_*` hierarchy used by Character Creator and iClone. The built-in
+Unreal profile is UE5-only.
+
+Before applying constraints, place the source and target in matching reference
+poses. Epic recommends matching retarget poses when proportions or base poses
+differ. Reallusion users should select **Unreal (UE5 Skeleton)** during export.
+
+Official references:
+
+- [Epic: Retargeting Bipeds with IK Rig](https://dev.epicgames.com/documentation/unreal-engine/retargeting-bipeds-with-ik-rig-in-unreal-engine)
+- [Epic: Skeletons in Unreal Engine](https://dev.epicgames.com/documentation/en-us/unreal-engine/skeletons-in-unreal-engine)
+- [Reallusion: Exporting Characters from iClone or Character Creator](https://manual.reallusion.com/CC-iC-Auto-Setup/All-in-One/1.2/02_for_Unreal/Exporting-Characters-from-iC-or-CC.htm)
 
 <img width="1233" height="839" alt="image" src="https://github.com/user-attachments/assets/d76290db-7662-4223-9cd6-7083f89b35ca" />
 
@@ -199,6 +215,7 @@ To add a constraint:
 | `panels.py` | N-panel UI |
 | `constraints.py` | Converts Blender constraint markers to Kimodo JSON |
 | `retarget.py` | Applies / bakes retargeting constraints |
+| `retarget_presets.py` | Built-in Unreal UE5 and Reallusion CC/iClone skeleton maps |
 | `ui_list.py` | UIList helper for the bone mapping panel |
 | `setup_operator.py` | One-click auto-installer for Kimodo and all dependencies |
 

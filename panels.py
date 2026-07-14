@@ -741,7 +741,22 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         box.label(text="Armatures", icon='ARMATURE_DATA')
         box.prop(s, "source_armature", text="Source (Kimodo)")
         box.prop(s, "target_armature", text="Target (Your Rig)")
-        box.prop(s, "retarget_root_bone", text="Root Bone")
+        box.prop(s, "retarget_profile", text="Target Profile")
+        if s.target_armature and s.retarget_profile == "AUTO":
+            try:
+                from . import retarget as rt
+                detected_id = rt.detect_target_profile(s.target_armature)
+                detected_label = rt.profile_label(detected_id) if detected_id else "Unknown humanoid"
+            except Exception:
+                detected_label = "Unknown humanoid"
+            box.label(text=f"Detected: {detected_label}", icon='INFO')
+        if s.target_armature:
+            box.prop_search(
+                s, "retarget_root_bone", s.target_armature.data, "bones",
+                text="Root Bone",
+            )
+        else:
+            box.prop(s, "retarget_root_bone", text="Root Bone")
 
         layout.separator()
 
@@ -750,9 +765,9 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         layout.label(text="Link toggle = target bone's Inherit Rotation", icon='LINKED')
 
         if s.source_armature and s.target_armature:
-            # Auto-match button
+            # Official target profile first, name heuristics only as fallback.
             layout.operator("kimodo.auto_map_bones",
-                            text="Auto-Match Bones", icon='SHADERFX')
+                            text="Build Profile Mapping", icon='SHADERFX')
 
         row = layout.row()
         row.template_list(

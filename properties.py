@@ -247,7 +247,7 @@ class KIMODO_BoneMappingItem(PropertyGroup):
             ("COPY_ROTATION",    "Copy Rotation",    "Copy only rotation; root bone also gets Copy Location"),
             ("COPY_TRANSFORMS",  "Copy Transforms",  "Copy location + rotation + scale together"),
             ("CHILD_OF",         "Child Of",         "Full parent-child relationship; preserves rest-pose offset"),
-            ("CHILD_OF_ROTATION", "Child Of (Rotation)", "Child Of constraint with only rotation enabled (no location or scale)"),
+            ("CHILD_OF_ROTATION", "Local Rotation", "Copy rotation in Local Owner Orientation space without changing location or scale"),
         ],
         default="CHILD_OF",
     )
@@ -408,6 +408,16 @@ class KIMODO_SceneSettings(PropertyGroup):
         description="Your character's armature to drive with the motion",
         type=bpy.types.Object,
         poll=lambda self, obj: obj.type == 'ARMATURE',
+    )
+    retarget_profile: EnumProperty(
+        name="Target Profile",
+        description="Official target skeleton profile used to build the bone map",
+        items=[
+            ("AUTO", "Auto Detect", "Detect Reallusion CC Base or Unreal UE5 from marker bones"),
+            ("UNREAL_UE5", "Unreal UE5", "UE5 Manny skeleton and Reallusion Unreal UE5 Skeleton export"),
+            ("REALLUSION_CC_BASE", "Reallusion CC / iClone", "Native CC Base skeleton used by Character Creator and iClone"),
+        ],
+        default="AUTO",
     )
     bone_mappings: CollectionProperty(type=KIMODO_BoneMappingItem)
     bone_mapping_index: IntProperty(default=0)

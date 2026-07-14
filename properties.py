@@ -439,6 +439,16 @@ class KIMODO_SceneSettings(PropertyGroup):
         description="Last standalone iClone motion export result",
         default="",
     )
+    iclone_live_target: StringProperty(
+        name="iClone Target",
+        description="Selected iClone avatar found by Kimodo Motion Receiver",
+        default="",
+    )
+    iclone_live_status: StringProperty(
+        name="iClone Live Status",
+        description="Last direct iClone motion transfer result",
+        default="Not checked",
+    )
 
     # --- Motion Constraints ---
     motion_constraints: CollectionProperty(type=KIMODO_ConstraintItem)

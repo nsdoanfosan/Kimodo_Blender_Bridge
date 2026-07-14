@@ -801,11 +801,50 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
 
         layout.separator()
 
-        # Standalone iClone external-motion export. No character, Rigify,
-        # Data Link, or Reallusion Blender add-on is required.
+        # Primary workflow: sample the complete Kimodo Action and let the
+        # restricted iClone receiver bake it into one Motion Clip.
+        live_box = layout.box()
+        live_box.label(text="iClone Direct Motion", icon='PLAY')
+        live_box.label(text="Select one target character in iClone")
+        try:
+            from . import iclone_live_send as icsend
+            live_state = icsend.inspect_source(s.source_armature)
+        except Exception:
+            live_state = {"ready": False, "action": "", "frame_count": 0, "missing_required": []}
+
+        if live_state.get("action"):
+            live_box.label(
+                text=f"Action: {live_state['action']} | {live_state['frame_count']} frames",
+                icon='ACTION',
+            )
+        elif s.source_armature:
+            live_box.label(text="Source has no active Action", icon='ERROR')
+        else:
+            live_box.label(text="Choose Source (Kimodo) above", icon='INFO')
+        if live_state.get("missing_required"):
+            live_box.label(
+                text="Missing: " + ", ".join(live_state["missing_required"]),
+                icon='ERROR',
+            )
+
+        row = live_box.row(align=True)
+        row.operator("kimodo.check_iclone_receiver", text="Check iClone", icon='FILE_REFRESH')
+        send_col = row.column()
+        send_col.enabled = bool(live_state.get("ready"))
+        send_col.operator(
+            "kimodo.send_motion_to_iclone",
+            text="Send Motion to iClone",
+            icon='PLAY',
+        )
+        live_box.label(text="Result: one Motion Clip; Motion Layer stays editable")
+        if s.iclone_live_status:
+            _label_wrapped(live_box, s.iclone_live_status, context, icon='INFO')
+
+        layout.separator()
+
+        # Manual file fallback for offline transfer.
         ic_box = layout.box()
-        ic_box.label(text="iClone Motion Export", icon='EXPORT')
-        ic_box.label(text="No Data Link or target character required", icon='CHECKMARK')
+        ic_box.label(text="Manual FBX Fallback", icon='EXPORT')
         try:
             from . import iclone_motion_export as icexport
             ic_state = icexport.inspect_source(s.source_armature)
@@ -840,7 +879,7 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
             text="Export FBX + 3DX Profile",
             icon='EXPORT',
         )
-        ic_box.label(text="iClone: File > Import > Import External Motion")
+        ic_box.label(text="Offline fallback: import manually in iClone")
         ic_box.label(text="Load the companion .3dxProfile; Root Bone: Root")
 
         if s.iclone_last_export_path:

@@ -18,6 +18,7 @@ from bpy_extras.io_utils import ExportHelper
 from . import subprocess_client as sc
 from . import retarget as rt
 from . import iclone_motion_export as icexport
+from . import iclone_live_send as icsend
 from . import constraints as cmod
 from . import setup_operator as so
 
@@ -779,6 +780,59 @@ class KIMODO_OT_BakeRetargeting(Operator):
         else:
             self.report({'ERROR'}, "Bake failed — check console for details")
         return {'FINISHED'} if success else {'CANCELLED'}
+
+
+class KIMODO_OT_CheckICloneReceiver(Operator):
+    """Verify the selected iClone avatar and Kimodo motion receiver"""
+    bl_idname = "kimodo.check_iclone_receiver"
+    bl_label = "Check iClone"
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            target = icsend.inspect_connection()
+        except icsend.ICloneLiveSendError as exc:
+            settings.iclone_live_status = str(exc)
+            settings.iclone_live_target = ""
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        settings.iclone_live_target = target["avatar_name"]
+        settings.iclone_live_status = (
+            f"Connected: {target['avatar_name']} | {target['bone_count']} bones | "
+            f"insert frame {target['current_frame']}"
+        )
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
+
+
+class KIMODO_OT_SendMotionToIClone(Operator):
+    """Retarget the complete Kimodo Action into one iClone Motion Clip"""
+    bl_idname = "kimodo.send_motion_to_iclone"
+    bl_label = "Send Motion to iClone"
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            result = icsend.send_motion(settings.source_armature)
+        except icsend.ICloneLiveSendError as exc:
+            settings.iclone_live_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        except Exception as exc:
+            message = f"iClone live transfer failed: {exc}"
+            settings.iclone_live_status = message
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+        applied = result["result"]
+        settings.iclone_live_target = result["target"]["name"]
+        settings.iclone_live_status = (
+            f"Sent {result['source']['action']} to {result['target']['name']}: "
+            f"{applied['source_frames']} frames, {result['mapped_bones']} bones, "
+            "1 flattened Motion Clip"
+        )
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
 
 
 class KIMODO_OT_ExportICloneMotion(Operator, ExportHelper):
@@ -2351,6 +2405,8 @@ _classes = [
     KIMODO_OT_ApplyRetargeting,
     KIMODO_OT_RemoveRetargeting,
     KIMODO_OT_BakeRetargeting,
+    KIMODO_OT_CheckICloneReceiver,
+    KIMODO_OT_SendMotionToIClone,
     KIMODO_OT_ExportICloneMotion,
     KIMODO_OT_SavePreset,
     KIMODO_OT_LoadPreset,

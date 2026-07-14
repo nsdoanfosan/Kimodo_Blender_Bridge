@@ -149,23 +149,25 @@ Official references:
 - [Epic: Skeletons in Unreal Engine](https://dev.epicgames.com/documentation/en-us/unreal-engine/skeletons-in-unreal-engine)
 - [Reallusion: Exporting Characters from iClone or Character Creator](https://manual.reallusion.com/CC-iC-Auto-Setup/All-in-One/1.2/02_for_Unreal/Exporting-Characters-from-iC-or-CC.htm)
 
-### Export Kimodo motion directly to iClone
+### Send Kimodo motion directly to iClone
 
-iClone 8 can import external biped motion from FBX or BVH. The bridge can
-therefore export a generated Kimodo Action without Data Link, Rigify, a target
-character in Blender, or the Reallusion Blender add-on.
+The primary workflow does not use FBX import, Data Link, Rigify, or a
+Blender-side character. The selected iClone character is the retarget target.
 
-1. In **Retarget**, choose the generated rig as **Source (Kimodo)**.
-2. In **iClone Motion Export**, click **Export FBX + 3DX Profile**.
-3. In iClone, select the character that should receive the motion.
-4. Choose **File > Import > Import External Motion** and open the FBX.
-5. Load the companion `.3dxProfile`, choose `Root` as the source root bone,
-   and convert the motion.
+1. Install/start the bundled **Kimodo Motion Receiver** OpenPlugin and restart iClone.
+2. In iClone, select exactly one CC character and move the playhead to the insertion frame.
+3. In Blender **Retarget**, choose the generated rig as **Source (Kimodo)**.
+4. Click **Check iClone**, then **Send Motion to iClone**.
 
-The FBX contains only the evaluated SOMA armature animation. The generated
-profile supplies iClone's HIK bone map and rest-pose rotations, including the
-Kimodo v1.1 finger layout. The resulting motion can be saved to iClone's custom
-motion library and applied to other Standard or Humanoid characters.
+Blender queries the live CC Base rest hierarchy, samples the complete active
+Kimodo Action, converts the joint deltas to the character's axes, and transfers
+all frames over a token-authenticated localhost connection. iClone writes the
+frames to a temporary construction layer, flattens them into one Motion Clip,
+and verifies that Motion Layer is empty for subsequent hand editing.
+
+The older **Manual FBX Fallback** remains available for offline interchange.
+It exports an animation-only FBX and companion `.3dxProfile` for iClone's
+**Import External Motion** command.
 
 Official reference:
 
@@ -201,7 +203,7 @@ To add a constraint:
 | **Motion Segments** | Prompt list, frame ranges, Generate Selected / Generate All |
 | **Quick Generate** | Single-prompt generation with duration and seed controls |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
-| **Retarget** | Bone mapping, Apply Constraints, Bake, standalone iClone motion export |
+| **Retarget** | Bone mapping, Apply Constraints, Bake, direct iClone Motion Clip transfer, manual FBX fallback |
 | **Help** | Quick-start checklist, VRAM tip |
 
 ---
@@ -238,7 +240,9 @@ To add a constraint:
 | `constraints.py` | Converts Blender constraint markers to Kimodo JSON |
 | `retarget.py` | Applies / bakes retargeting constraints |
 | `retarget_presets.py` | Built-in Unreal UE5 and Reallusion CC/iClone skeleton maps |
+| `iclone_live_send.py` | Live CC rest-axis sampling and direct Motion Clip transfer |
 | `iclone_motion_export.py` | Standalone FBX + 3DX motion export for iClone |
+| `iclone_plugin/kimodo_motion_receiver/` | Restricted iClone OpenPlugin receiver |
 | `ui_list.py` | UIList helper for the bone mapping panel |
 | `setup_operator.py` | One-click auto-installer for Kimodo and all dependencies |
 

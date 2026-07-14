@@ -805,7 +805,44 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         # use Reallusion's official Data Link sequence transfer.
         live_box = layout.box()
         live_box.label(text="iClone Official Data Link", icon='PLAY')
-        live_box.label(text="Select one avatar in iClone; target import is automatic")
+        live_box.label(text="Targets are registered per iClone project in Blender")
+        if s.iclone_project_name:
+            live_box.label(text=f"Project: {s.iclone_project_name}", icon='FILE_BLEND')
+        if s.iclone_project_session_only:
+            _label_wrapped(
+                live_box,
+                "Default or unsaved iClone project: target registration lasts for this session only.",
+                context,
+                icon='INFO',
+            )
+        if s.iclone_project_needs_save:
+            _label_wrapped(
+                live_box,
+                "A new Link ID is only in memory. Save the iClone project manually to keep it.",
+                context,
+                icon='ERROR',
+            )
+
+        try:
+            from . import iclone_official_send as icofficial
+            catalog_avatars = list(icofficial.current_catalog().get("actors") or [])
+        except Exception:
+            catalog_avatars = []
+        if catalog_avatars:
+            live_box.prop(s, "iclone_target_choice", text="Target")
+        target_row = live_box.row(align=True)
+        target_row.operator(
+            "kimodo.refresh_iclone_targets",
+            text="Refresh",
+            icon='FILE_REFRESH',
+        )
+        change_col = target_row.column(align=True)
+        change_col.enabled = bool(catalog_avatars)
+        change_col.operator(
+            "kimodo.set_iclone_target",
+            text="Use / Change Target",
+            icon='LINKED',
+        )
         try:
             from . import iclone_live_send as icsend
             live_state = icsend.inspect_source(s.source_armature)
@@ -834,7 +871,7 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
             text="Send Motion to iClone",
             icon='PLAY',
         )
-        live_box.label(text="One click: connect -> CC retarget -> Motion Clip")
+        live_box.label(text="Usual flow: Send -> CC retarget -> Motion Clip")
         if s.iclone_live_status:
             _label_wrapped(live_box, s.iclone_live_status, context, icon='INFO')
 

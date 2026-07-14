@@ -783,6 +783,28 @@ class KIMODO_OT_BakeRetargeting(Operator):
         return {'FINISHED'} if success else {'CANCELLED'}
 
 
+def _iclone_catalog_message(resolution, catalog):
+    project = catalog.get("project") or {}
+    name = str(project.get("name") or "iClone project")
+    status = resolution["status"]
+    if status == "empty":
+        message = f"{name}: no avatars found"
+    elif status == "choose":
+        message = f"{name}: choose an avatar below, then use Change Target"
+    elif status == "stale":
+        old_name = str((resolution.get("binding") or {}).get("avatar_name") or "saved target")
+        message = f"{name}: {old_name} is no longer available; choose a target again"
+    else:
+        avatar = resolution.get("avatar") or {}
+        verb = "Auto-registered" if status == "auto" else "Registered"
+        message = f"{verb}: {avatar.get('name', 'iClone avatar')} for {name}"
+    if project.get("session_only"):
+        message += ". Session only: save as a named iClone project for persistent registration"
+    if catalog.get("project_needs_save"):
+        message += ". New Link ID is in memory; save the iClone project manually to keep it"
+    return message
+
+
 class KIMODO_OT_CheckICloneReceiver(Operator):
     """Verify the selected iClone avatar and Kimodo motion receiver"""
     bl_idname = "kimodo.check_iclone_receiver"
@@ -806,16 +828,14 @@ class KIMODO_OT_CheckICloneReceiver(Operator):
         return {'FINISHED'}
 
 
-class KIMODO_OT_SendMotionToIClone(Operator):
-    """Prepare the selected iClone target and send one Kimodo Motion Clip"""
-    bl_idname = "kimodo.send_motion_to_iclone"
-    bl_label = "Send Motion to iClone"
+class KIMODO_OT_RefreshICloneTargets(Operator):
+    """Refresh the current iClone project and avatar catalog"""
+    bl_idname = "kimodo.refresh_iclone_targets"
+    bl_label = "Refresh iClone Targets"
 
     _timer = None
     _started_at = 0.0
     _request_sent = False
-    _source = None
-    _preferred_target = None
 
     def _finish_timer(self, context):
         if self._timer is not None:
@@ -833,27 +853,139 @@ class KIMODO_OT_SendMotionToIClone(Operator):
         if not icofficial.is_link_connected():
             settings.iclone_live_status = "Starting official Data Link..."
             return None
+        if not self._request_sent:
+            icofficial.request_iclone_catalog()
+            self._request_sent = True
+            settings.iclone_live_status = "Refreshing iClone project avatars..."
+            return None
+        state = icofficial.iclone_catalog_state()
+        if state["error"]:
+            raise icofficial.ICloneOfficialSendError(state["error"])
+        if not state["received"]:
+            return None
+        catalog = state["catalog"]
+        resolution = icofficial.resolve_catalog_target(settings, catalog)
+        settings.iclone_live_status = _iclone_catalog_message(resolution, catalog)
+        self._finish_timer(context)
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
 
-        target = icofficial.find_available_target(
-            self._source,
-            self._preferred_target,
-        )
-        if target is None:
-            if not self._request_sent:
-                icofficial.request_selected_iclone_target()
-                self._request_sent = True
-                settings.iclone_live_status = (
-                    "Requesting the selected iClone avatar through Data Link..."
+    def execute(self, context):
+        self._started_at = time.monotonic()
+        self._request_sent = False
+        try:
+            icofficial.begin_one_click_session()
+            immediate = self._advance(context)
+            if immediate is not None:
+                return immediate
+        except Exception as exc:
+            return self._fail(context, f"iClone refresh failed: {exc}")
+        self._timer = context.window_manager.event_timer_add(0.25, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            return self._fail(context, "iClone refresh cancelled")
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        if time.monotonic() - self._started_at > 60.0:
+            return self._fail(context, "Timed out waiting for iClone Data Link")
+        try:
+            result = self._advance(context)
+            return result if result is not None else {'RUNNING_MODAL'}
+        except Exception as exc:
+            return self._fail(context, f"iClone refresh failed: {exc}")
+
+
+class KIMODO_OT_SetICloneTarget(Operator):
+    """Register the chosen avatar for the catalog's iClone project"""
+    bl_idname = "kimodo.set_iclone_target"
+    bl_label = "Use / Change iClone Target"
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            result = icofficial.bind_selected_target(settings)
+        except Exception as exc:
+            settings.iclone_live_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        project = result["project"]
+        avatar = result["avatar"]
+        scope = "for this session" if project.get("session_only") else "for this iClone project"
+        settings.iclone_live_status = f"Target changed to {avatar['name']} {scope}"
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
+
+
+class KIMODO_OT_SendMotionToIClone(Operator):
+    """Resolve the registered iClone target and send one Kimodo Motion Clip"""
+    bl_idname = "kimodo.send_motion_to_iclone"
+    bl_label = "Send Motion to iClone"
+
+    _timer = None
+    _started_at = 0.0
+    _catalog_sent = False
+    _target_sent = False
+    _source = None
+
+    def _finish_timer(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+
+    def _fail(self, context, message):
+        self._finish_timer(context)
+        context.scene.kimodo.iclone_live_status = message
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+    def _pause_for_target(self, context, message):
+        self._finish_timer(context)
+        context.scene.kimodo.iclone_live_status = message
+        self.report({'INFO'}, message)
+        return {'CANCELLED'}
+
+    def _advance(self, context):
+        settings = context.scene.kimodo
+        if not icofficial.is_link_connected():
+            settings.iclone_live_status = "Starting official Data Link..."
+            return None
+
+        if not self._catalog_sent:
+            icofficial.request_iclone_catalog()
+            self._catalog_sent = True
+            settings.iclone_live_status = "Checking the current iClone project..."
+            return None
+        if not self._target_sent:
+            state = icofficial.iclone_catalog_state()
+            if state["error"]:
+                raise icofficial.ICloneOfficialSendError(state["error"])
+            if not state["received"]:
+                return None
+            catalog = state["catalog"]
+            resolution = icofficial.resolve_catalog_target(settings, catalog)
+            if resolution["status"] in {"empty", "choose", "stale"}:
+                return self._pause_for_target(
+                    context,
+                    _iclone_catalog_message(resolution, catalog),
                 )
-                return None
-            request = icofficial.requested_target_state()
-            if request["error"]:
-                raise icofficial.ICloneOfficialSendError(request["error"])
-            target = request["target"]
-            if target is None:
-                name = request["target_name"] or "selected avatar"
-                settings.iclone_live_status = f"Importing {name} from iClone..."
-                return None
+            avatar = resolution["avatar"]
+            project = catalog.get("project") or {}
+            icofficial.request_exact_iclone_target(project.get("key"), avatar.get("link_id"))
+            self._target_sent = True
+            settings.iclone_live_status = f"Preparing {avatar.get('name', 'iClone avatar')}..."
+            return None
+
+        request = icofficial.requested_target_state()
+        if request["error"]:
+            raise icofficial.ICloneOfficialSendError(request["error"])
+        target = request["target"]
+        if target is None:
+            name = request["target_name"] or "registered avatar"
+            settings.iclone_live_status = f"Importing {name} from iClone..."
+            return None
 
         settings.target_armature = target
         result = icofficial.send_motion(self._source, target)
@@ -869,8 +1001,8 @@ class KIMODO_OT_SendMotionToIClone(Operator):
     def execute(self, context):
         settings = context.scene.kimodo
         self._source = settings.source_armature
-        self._preferred_target = settings.target_armature
-        self._request_sent = False
+        self._catalog_sent = False
+        self._target_sent = False
         self._started_at = time.monotonic()
         try:
             if not self._source or self._source.type != 'ARMATURE':
@@ -2484,6 +2616,8 @@ _classes = [
     KIMODO_OT_RemoveRetargeting,
     KIMODO_OT_BakeRetargeting,
     KIMODO_OT_CheckICloneReceiver,
+    KIMODO_OT_RefreshICloneTargets,
+    KIMODO_OT_SetICloneTarget,
     KIMODO_OT_SendMotionToIClone,
     KIMODO_OT_ExportICloneMotion,
     KIMODO_OT_SavePreset,

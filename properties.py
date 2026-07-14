@@ -11,6 +11,14 @@ from bpy.props import (
 from bpy.types import PropertyGroup, AddonPreferences
 
 
+def _iclone_target_items(self, context):
+    try:
+        from . import iclone_official_send
+        return iclone_official_send.avatar_enum_items()
+    except Exception:
+        return [("__NONE__", "No iClone avatars", "Refresh the iClone avatar list")]
+
+
 # ---------------------------------------------------------------------------
 # Motion segment (one prompt + time range bar in the timeline)
 # ---------------------------------------------------------------------------
@@ -441,8 +449,30 @@ class KIMODO_SceneSettings(PropertyGroup):
     )
     iclone_live_target: StringProperty(
         name="iClone Target",
-        description="Selected iClone avatar found by Kimodo Motion Receiver",
+        description="Avatar registered for the current iClone project",
         default="",
+    )
+    iclone_target_choice: EnumProperty(
+        name="iClone Avatar",
+        description="Avatar to register for the current iClone project",
+        items=_iclone_target_items,
+    )
+    iclone_project_name: StringProperty(
+        name="iClone Project",
+        default="",
+    )
+    iclone_project_path: StringProperty(
+        name="iClone Project Path",
+        default="",
+    )
+    iclone_project_session_only: BoolProperty(
+        name="Session-only iClone Target",
+        default=False,
+    )
+    iclone_project_needs_save: BoolProperty(
+        name="iClone Project Needs Save",
+        description="A new Data Link ID was assigned in memory; iClone was not saved automatically",
+        default=False,
     )
     iclone_live_status: StringProperty(
         name="iClone Live Status",

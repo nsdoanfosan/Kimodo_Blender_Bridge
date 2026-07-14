@@ -7,11 +7,19 @@ import importlib
 import bpy
 from mathutils import Matrix
 
+from . import iclone_target_bindings
 from . import retarget_presets
 
 
 class ICloneOfficialSendError(RuntimeError):
     pass
+
+
+_CATALOG = {}
+_AVATAR_ENUM_ITEMS = []
+_EMPTY_ENUM_ITEMS = [
+    ("__NONE__", "No iClone avatars", "Refresh after opening an iClone project with an avatar"),
+]
 
 
 def _official_modules():
@@ -71,7 +79,7 @@ def find_available_target(source, preferred=None):
 
 
 def begin_one_click_session():
-    """Start Data Link and clear any previous automatic target request."""
+    """Start Data Link and clear any previous catalog/target request."""
     _link, _vars_module, integration = _official_modules()
     integration.reset_request()
     integration.start_link()
@@ -82,9 +90,19 @@ def is_link_connected():
     return integration.is_connected()
 
 
-def request_selected_iclone_target():
+def request_iclone_catalog():
     _link, _vars_module, integration = _official_modules()
-    integration.request_selected_avatar()
+    integration.request_avatar_catalog()
+
+
+def iclone_catalog_state():
+    _link, _vars_module, integration = _official_modules()
+    return integration.catalog_state()
+
+
+def request_exact_iclone_target(project_key, link_id):
+    _link, _vars_module, integration = _official_modules()
+    integration.request_avatar_target(project_key, link_id)
 
 
 def requested_target_state():
@@ -92,6 +110,102 @@ def requested_target_state():
     state = integration.request_state()
     state["target"] = integration.find_requested_target()
     return state
+
+
+def avatar_enum_items():
+    """Return a module-owned list so Blender can safely retain enum strings."""
+    return _AVATAR_ENUM_ITEMS if _AVATAR_ENUM_ITEMS else _EMPTY_ENUM_ITEMS
+
+
+def current_catalog():
+    return _CATALOG
+
+
+def update_catalog(settings, catalog):
+    """Publish a catalog to the Kimodo panel without persisting a choice."""
+    global _CATALOG
+    project = dict(catalog.get("project") or {})
+    avatars = [
+        dict(avatar) for avatar in (catalog.get("actors") or [])
+        if avatar.get("link_id")
+    ]
+    _CATALOG = {
+        "project": project,
+        "actors": avatars,
+        "project_needs_save": bool(catalog.get("project_needs_save")),
+    }
+    _AVATAR_ENUM_ITEMS[:] = [
+        (
+            str(avatar["link_id"]),
+            str(avatar.get("name") or "Unnamed Avatar"),
+            "{} | Link ID {}".format(
+                str(avatar.get("type") or "AVATAR"),
+                str(avatar["link_id"]),
+            ),
+        )
+        for avatar in avatars
+    ]
+
+    settings.iclone_project_name = str(project.get("name") or "Unknown iClone Project")
+    settings.iclone_project_path = str(project.get("path") or "")
+    settings.iclone_project_session_only = bool(project.get("session_only"))
+    settings.iclone_project_needs_save = bool(catalog.get("project_needs_save"))
+
+    binding = iclone_target_bindings.get_binding(project)
+    valid_ids = {str(avatar["link_id"]) for avatar in avatars}
+    preferred = str((binding or {}).get("link_id") or "")
+    if preferred not in valid_ids:
+        preferred = str(avatars[0]["link_id"]) if avatars else "__NONE__"
+    settings.iclone_target_choice = preferred
+    return {
+        "project": project,
+        "avatars": avatars,
+        "binding": binding,
+    }
+
+
+def _avatar_by_link_id(avatars, link_id):
+    link_id = str(link_id or "")
+    return next(
+        (avatar for avatar in avatars if str(avatar.get("link_id") or "") == link_id),
+        None,
+    )
+
+
+def resolve_catalog_target(settings, catalog):
+    """Resolve a saved binding, or auto-register the only avatar."""
+    state = update_catalog(settings, catalog)
+    project = state["project"]
+    avatars = state["avatars"]
+    binding = state["binding"]
+    if not avatars:
+        return {"status": "empty", "avatar": None, "binding": binding}
+    if binding:
+        avatar = _avatar_by_link_id(avatars, binding.get("link_id"))
+        if avatar:
+            settings.iclone_target_choice = str(avatar["link_id"])
+            settings.iclone_live_target = str(avatar.get("name") or "")
+            return {"status": "bound", "avatar": avatar, "binding": binding}
+        return {"status": "stale", "avatar": None, "binding": binding}
+    if len(avatars) == 1:
+        avatar = avatars[0]
+        iclone_target_bindings.set_binding(project, avatar)
+        settings.iclone_target_choice = str(avatar["link_id"])
+        settings.iclone_live_target = str(avatar.get("name") or "")
+        return {"status": "auto", "avatar": avatar, "binding": None}
+    return {"status": "choose", "avatar": None, "binding": None}
+
+
+def bind_selected_target(settings):
+    catalog = current_catalog()
+    project = dict(catalog.get("project") or {})
+    avatars = list(catalog.get("actors") or [])
+    avatar = _avatar_by_link_id(avatars, settings.iclone_target_choice)
+    if not project.get("key") or not avatar:
+        raise ICloneOfficialSendError("Refresh the iClone avatar list, then choose a target")
+    binding = iclone_target_bindings.set_binding(project, avatar)
+    settings.iclone_live_target = str(avatar.get("name") or "")
+    return {"project": project, "avatar": avatar, "binding": binding}
 
 
 def _mapping(source, target):

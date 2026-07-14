@@ -176,11 +176,18 @@ class KIMODO_OT_StartKimodo(Operator):
     _timer  = None
     _thread = None
 
-    def _run_start(self, python_exe: str, model_name: str, use_offload: bool):
+    def _run_start(self, python_exe: str, model_name: str, use_offload: bool,
+                   env_overrides: "dict | None" = None):
         def progress(msg):
             _start_state["message"] = msg
 
-        success, msg = sc.start(python_exe, model_name, use_offload=use_offload, progress_callback=progress)
+        success, msg = sc.start(
+            python_exe,
+            model_name,
+            use_offload=use_offload,
+            progress_callback=progress,
+            env_overrides=env_overrides,
+        )
         _start_state["success"] = success
         _start_state["message"] = msg
         _start_state["done"]    = True
@@ -201,16 +208,45 @@ class KIMODO_OT_StartKimodo(Operator):
         # Resolve the Python hint on the main thread. When the scene has no
         # explicit path, fall back to the remembered managed-venv location
         # (addon preference) so a fresh scene still finds the install.
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+        except Exception:
+            prefs = None
+
         python_hint = (s.python_executable or "").strip()
+        if not python_hint and prefs is not None:
+            python_hint = (prefs.kimodo_python_executable or "").strip()
         if not python_hint:
             try:
                 python_hint = so.managed_python()
             except Exception:
                 python_hint = ""
 
+        # External Kimodo environments may keep their HuggingFace cache away
+        # from the user's default profile. Resolve these Blender preferences on
+        # the main thread, then pass a plain dict to the worker thread.
+        env_overrides = {}
+        try:
+            if prefs is None:
+                raise RuntimeError("Kimodo addon preferences are unavailable")
+            hf_home = (prefs.hf_cache_dir or "").strip()
+            if hf_home:
+                hf_home = os.path.abspath(
+                    bpy.path.abspath(os.path.expanduser(hf_home))
+                )
+                env_overrides["HF_HOME"] = hf_home
+                env_overrides["HUGGINGFACE_CACHE_DIR"] = os.path.join(hf_home, "hub")
+            if prefs.text_encoder_device != "auto":
+                env_overrides["TEXT_ENCODER_DEVICE"] = prefs.text_encoder_device
+            env_overrides["TEXT_ENCODER_MODE"] = prefs.text_encoder_mode
+            env_overrides["HF_HUB_DISABLE_XET"] = "1"
+            env_overrides["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        except Exception:
+            pass
+
         self._thread = threading.Thread(
             target=self._run_start,
-            args=(python_hint, s.kimodo_model, s.use_offload),
+            args=(python_hint, s.kimodo_model, s.use_offload, env_overrides),
             daemon=True,
         )
         self._thread.start()

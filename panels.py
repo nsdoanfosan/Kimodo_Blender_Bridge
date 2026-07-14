@@ -111,6 +111,17 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         layout = self.layout
         s = context.scene.kimodo
 
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            persistent_python = (prefs.kimodo_python_executable or "").strip()
+        except Exception:
+            persistent_python = ""
+        scene_python = (s.python_executable or "").strip()
+        configured_python = scene_python or persistent_python
+        configured_python_valid = bool(
+            configured_python and os.path.isfile(configured_python)
+        )
+
         running = s.is_connected
 
         # --- Auto-install section ---
@@ -127,7 +138,11 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.progress(factor=dl_pct, text=f"{short}  {int(dl_pct * 100)}%")
             layout.separator(factor=0.5)
 
-        elif so.install_failed() or (so.venv_exists() and not so.is_installed()):
+        elif so.install_failed() or (
+            so.venv_exists()
+            and not so.is_installed()
+            and not configured_python_valid
+        ):
             # install_failed()  → failed this session
             # venv_exists() but not is_installed() → partial venv from a
             # previous session (no sentinel file); treat it the same way.
@@ -175,7 +190,11 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                          text="Reset Venv", icon='TRASH')
             layout.separator(factor=0.5)
 
-        elif not so.is_installed() and not so.is_kimodo_venv(s.python_executable):
+        elif (
+            not so.is_installed()
+            and not configured_python_valid
+            and not so.is_kimodo_venv(scene_python)
+        ):
             box = layout.box()
             has_gpu = so.has_nvidia_gpu()
             if not has_gpu:
@@ -193,10 +212,10 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             row.enabled = has_gpu
             row.operator("kimodo.install_kimodo", icon='IMPORT')
             # Advanced overrides (Python / HF token / explicit install location).
-            self._draw_advanced(box, context, s, show_python=False)
+            self._draw_advanced(box, context, s, show_python=True)
             layout.separator(factor=0.5)
 
-        elif not s.python_executable or not os.path.isfile(s.python_executable):
+        elif not configured_python_valid and not so.managed_python():
             box = layout.box()
             box.label(text="Kimodo venv ready", icon='CHECKMARK')
             box.operator("kimodo.use_installed_kimodo", icon='CONSOLE')
@@ -270,20 +289,35 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             return
 
         col = box.column(align=True)
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+        except Exception:
+            prefs = None
         if show_python:
-            col.label(text="Kimodo Python:", icon='CONSOLE')
+            col.label(text="Kimodo Python (persistent):", icon='CONSOLE')
             row = col.row(align=True)
-            row.prop(s, "python_executable", text="")
+            if prefs is not None:
+                row.prop(prefs, "kimodo_python_executable", text="")
+            else:
+                row.prop(s, "python_executable", text="")
             row.enabled = not s.is_connected
-            col.label(text="Leave blank to auto-detect from PATH / sibling venv",
+            col.label(text="Leave blank to use the managed install / auto-detect",
                       icon='INFO')
             col.separator(factor=0.5)
 
         try:
-            prefs = context.preferences.addons[__package__].preferences
+            if prefs is None:
+                raise RuntimeError("Kimodo addon preferences are unavailable")
             col.label(text="HF Token (optional — set if model downloads stall):",
                       icon='LOCKED')
             col.prop(prefs, "hf_token", text="")
+            col.label(text="HuggingFace cache (optional HF_HOME):",
+                      icon='FILE_FOLDER')
+            col.prop(prefs, "hf_cache_dir", text="")
+            col.label(text="Text encoder:", icon='MEMORY')
+            row = col.row(align=True)
+            row.prop(prefs, "text_encoder_device", text="Device")
+            row.prop(prefs, "text_encoder_mode", text="Mode")
             col.label(text="System Python 3.10–3.12 (override auto-detect):",
                       icon='CONSOLE')
             col.prop(prefs, "system_python_override", text="")

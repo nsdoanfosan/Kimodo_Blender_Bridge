@@ -292,11 +292,12 @@ class KIMODO_SceneSettings(PropertyGroup):
         name="Model",
         description="Kimodo model to load into the bridge process",
         items=[
-            ("Kimodo-SOMA-RP-v1",  "Kimodo SOMA",   "Standard human SOMA skeleton (recommended)"),
+            ("Kimodo-SOMA-RP-v1.1", "Kimodo SOMA v1.1", "Latest SOMA model (recommended)"),
+            ("Kimodo-SOMA-RP-v1",  "Kimodo SOMA v1.0", "Original SOMA model"),
             ("Kimodo-SMPLX-RP-v1", "Kimodo SMPL-X (Unsupported atm)", "Extended body with hands and face"),
             ("Kimodo-G1-RP-v1",    "Kimodo G1 (Unsupported atm)",     "Unitree G1 robot skeleton"),
         ],
-        default="Kimodo-SOMA-RP-v1",
+        default="Kimodo-SOMA-RP-v1.1",
     )
     use_offload: BoolProperty(
         name="Enable Memory Offload",
@@ -516,6 +517,15 @@ class KIMODO_AddonPreferences(AddonPreferences):
         default="{}",
     )
 
+    kimodo_python_executable: StringProperty(
+        name="Kimodo Python",
+        description=(
+            "Persistent path to an existing Python environment with Kimodo "
+            "installed. This is separate from the managed install location."
+        ),
+        default="",
+        subtype='FILE_PATH',
+    )
     hf_token: StringProperty(
         name="HuggingFace Token",
         description=(
@@ -525,6 +535,38 @@ class KIMODO_AddonPreferences(AddonPreferences):
         ),
         default="",
         subtype='PASSWORD',
+    )
+
+    hf_cache_dir: StringProperty(
+        name="HuggingFace Cache",
+        description=(
+            "Optional HF_HOME directory used by an external Kimodo environment. "
+            "Leave blank to use the normal HuggingFace cache."
+        ),
+        default="",
+        subtype='DIR_PATH',
+    )
+
+    text_encoder_device: EnumProperty(
+        name="Text Encoder Device",
+        description="Device used for the LLM2Vec text encoder",
+        items=[
+            ("auto", "Auto", "Use Kimodo's automatic device selection"),
+            ("cpu", "CPU", "Use system RAM and preserve GPU memory"),
+            ("cuda", "CUDA", "Run the text encoder on the NVIDIA GPU"),
+        ],
+        default="cpu",
+    )
+
+    text_encoder_mode: EnumProperty(
+        name="Text Encoder Mode",
+        description="How Kimodo obtains text embeddings",
+        items=[
+            ("auto", "Auto", "Try a text-encoder service, then fall back to local"),
+            ("local", "Local", "Always load the text encoder in this process"),
+            ("api", "API", "Require a separately running text-encoder service"),
+        ],
+        default="local",
     )
 
     system_python_override: StringProperty(

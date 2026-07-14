@@ -85,7 +85,8 @@ def _read_stdout(pipe, q: "queue.Queue") -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def start(python_exe: str, model_name: str, use_offload: bool = False, progress_callback=None) -> "tuple[bool, str]":
+def start(python_exe: str, model_name: str, use_offload: bool = False,
+          progress_callback=None, env_overrides: "dict | None" = None) -> "tuple[bool, str]":
     """
     Launch bridge_server.py and block until the model reports ready.
     Must be called from a background thread — model loading takes 1-3 min.
@@ -132,7 +133,7 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,      # line-buffered
-                env=_bridge_env(python),
+                env=_bridge_env(python, env_overrides),
                 **_NO_WINDOW,
             )
         except FileNotFoundError:
@@ -160,7 +161,10 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
     threading.Thread(target=_drain, args=(_proc.stderr,), daemon=True).start()
 
     # Wait for "ready" or "error"
-    deadline = time.monotonic() + 420   # 7-min ceiling (large models, slow GPU)
+    # The first launch may also download the gated 16 GB Llama text encoder.
+    # Keep the worker alive long enough for that one-time setup to complete.
+    startup_timeout = 45 * 60
+    deadline = time.monotonic() + startup_timeout
     while time.monotonic() < deadline:
         msg = _recv(timeout=0.5)
 
@@ -202,7 +206,7 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
             print(f"[Kimodo Bridge] {msg}", flush=True)
 
     stop()
-    return False, "Timed out waiting for Kimodo (>7 min)"
+    return False, "Timed out waiting for Kimodo (>45 min)"
 
 
 def stop() -> None:
@@ -412,7 +416,7 @@ def generate_motion_multi(
 # Bridge environment
 # ---------------------------------------------------------------------------
 
-def _bridge_env(python_exe: str) -> dict:
+def _bridge_env(python_exe: str, overrides: "dict | None" = None) -> dict:
     """
     Build the environment dict for the bridge subprocess.
     When the managed venv is in use and its LLM2Vec model has been downloaded,
@@ -437,6 +441,9 @@ def _bridge_env(python_exe: str) -> dict:
         env["TRANSFORMERS_OFFLINE"]  = "1"
         env["HF_DATASETS_OFFLINE"]   = "1"
         env["HF_HUB_OFFLINE"]        = "1"
+
+    if overrides:
+        env.update({key: value for key, value in overrides.items() if value})
 
     return env
 

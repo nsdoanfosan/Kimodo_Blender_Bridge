@@ -28,16 +28,18 @@ def make_source():
     bpy.ops.object.mode_set(mode="POSE")
     for pose_bone in source.pose.bones:
         pose_bone.rotation_mode = "XYZ"
-    for frame, angle, root_x in (
+    for frame, angle, hips_x in (
         (1, 0.0, 0.0),
         (2, math.radians(5.0), 0.01),
         (3, math.radians(10.0), 0.02),
     ):
         hips_pose = source.pose.bones["Hips"]
+        hips_pose.location = (hips_x, 0.0, 0.0)
+        hips_pose.keyframe_insert(data_path="location", frame=frame)
         hips_pose.rotation_euler = (angle, 0.0, 0.0)
         hips_pose.keyframe_insert(data_path="rotation_euler", frame=frame)
         root_pose = source.pose.bones["Root"]
-        root_pose.location = (root_x, 0.0, 0.0)
+        root_pose.location = (0.0, 0.0, 0.0)
         root_pose.keyframe_insert(data_path="location", frame=frame)
         root_pose.keyframe_insert(data_path="rotation_euler", frame=frame)
     bpy.ops.object.mode_set(mode="OBJECT")
@@ -80,7 +82,14 @@ def main():
         [2.0, 0.0, 0.0],
     ]
     assert abs(tracks["CC_Base_Hip"]["rotation_deg"][2][0] - 10.0) < 0.01
+    assert tracks["CC_Base_Hip"]["position_cm"] == [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ]
     assert metadata["mapped_bones"] == 2
+    assert metadata["root_motion_source"] == "Hips"
+    assert metadata["root_displacement_cm"] == [2.0, 0.0, 0.0]
     print("KIMODO_ICLONE_LIVE_SMOKE=" + json.dumps({
         "frame_count": payload["frame_count"],
         "mapped_bones": metadata["mapped_bones"],

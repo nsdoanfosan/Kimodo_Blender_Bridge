@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.6.1] - 2026-07-14
+
+### Changed
+
+- **Official iClone motion handoff**: Kimodo motion is now baked onto the actual CC armature imported by Reallusion Blender Auto Setup, then transferred with the official Data Link animation sequence.
+- **CC-space retargeting before transfer**: Root travel and all mapped body/finger rotations are authored in Blender on the 101-bone CC skeleton, avoiding the arm/hand distortion caused by direct SOMA-to-HIK baking in iClone.
+
+### Added
+
+- The bundled iClone receiver can start and inspect Reallusion's Blender Pipeline Data Link service for the integrated workflow.
+
 ## [1.6.0] - 2026-07-14
 
 ### Added

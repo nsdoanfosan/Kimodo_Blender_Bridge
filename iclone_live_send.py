@@ -171,7 +171,14 @@ def _target_global_rest_rotations(target_bones):
     return result
 
 
-def _source_local_delta(source, source_bone_name):
+def _source_parent_space_delta(source, source_bone_name):
+    """Return the pose offset in the bone parent's rest coordinate space.
+
+    iClone Motion Layer stores the same left-multiplied offset used by the
+    official Blender Pipeline plugin: ``pose_local @ rest_local^-1``.  The
+    previous implementation used the inverse order, which turns a valid pose
+    into a different rotation whenever the bone rest axes are not identity.
+    """
     pose_bone = source.pose.bones[source_bone_name]
     data_bone = source.data.bones[source_bone_name]
     if pose_bone.parent:
@@ -180,7 +187,7 @@ def _source_local_delta(source, source_bone_name):
     else:
         pose_local = pose_bone.matrix.copy()
         rest_local = data_bone.matrix_local.copy()
-    return (rest_local.inverted_safe() @ pose_local).to_quaternion().normalized()
+    return (pose_local @ rest_local.inverted_safe()).to_quaternion().normalized()
 
 
 def build_motion_payload(source, target_response):
@@ -207,31 +214,53 @@ def build_motion_payload(source, target_response):
         target_name: {
             "bone": target_name,
             "rotation_deg": [],
+            "rotation_xyzw": [],
         }
         for _source_name, target_name in mappings
     }
-    source_rest = {
+    # A left-multiplied local offset lives in the parent coordinate system.
+    # Convert it through the source/target *parent* rest orientations, not the
+    # child bone orientations.  This matches iClone's Layer control contract.
+    source_parent_rest = {
         source_name: (
             source.matrix_world.to_quaternion() @
-            source.data.bones[source_name].matrix_local.to_quaternion()
+            (
+                source.data.bones[source_name].parent.matrix_local.to_quaternion()
+                if source.data.bones[source_name].parent
+                else Quaternion()
+            )
         ).normalized()
         for source_name, _target_name in mappings
     }
+    target_parent_rest = {
+        target_name: (
+            target_rest[target_bones[target_name].get("parent")]
+            if target_bones[target_name].get("parent") in target_rest
+            else Quaternion()
+        )
+        for _source_name, target_name in mappings
+    }
     previous_eulers = {}
-    root_origin = None
+    hips_origin = None
+    root_track = track_data.get("RL_BoneRoot")
+    hip_track = track_data.get("CC_Base_Hip")
+    if root_track is not None:
+        root_track["position_cm"] = []
+    if hip_track is not None:
+        hip_track["position_cm"] = []
     try:
         for frame in frames:
             bpy.context.scene.frame_set(frame)
             bpy.context.view_layer.update()
             for source_name, target_name in mappings:
-                source_delta = _source_local_delta(source, source_name)
-                rest_rotation = source_rest[source_name]
+                source_delta = _source_parent_space_delta(source, source_name)
+                source_parent = source_parent_rest[source_name]
                 world_delta = (
-                    rest_rotation @ source_delta @ rest_rotation.inverted()
+                    source_parent @ source_delta @ source_parent.inverted()
                 ).normalized()
-                target_rotation = target_rest[target_name]
+                target_parent = target_parent_rest[target_name]
                 target_delta = (
-                    target_rotation.inverted() @ world_delta @ target_rotation
+                    target_parent.inverted() @ world_delta @ target_parent
                 ).normalized()
                 euler = target_delta.to_euler(
                     "XYZ", previous_eulers.get(target_name)
@@ -242,18 +271,30 @@ def build_motion_payload(source, target_response):
                     math.degrees(euler.y),
                     math.degrees(euler.z),
                 ])
+                track_data[target_name]["rotation_xyzw"].append([
+                    float(target_delta.x),
+                    float(target_delta.y),
+                    float(target_delta.z),
+                    float(target_delta.w),
+                ])
 
-                if source_name == "Root":
-                    world_position = (
-                        source.matrix_world @ source.pose.bones[source_name].matrix
-                    ).translation
-                    if root_origin is None:
-                        root_origin = world_position.copy()
-                        track_data[target_name]["position_cm"] = []
-                    delta = (world_position - root_origin) * 100.0
-                    track_data[target_name]["position_cm"].append([
-                        float(delta.x), float(delta.y), float(delta.z)
-                    ])
+            # Kimodo locomotion is authored on Hips while its Root remains at
+            # the origin.  Put horizontal travel on iClone's root and retain
+            # pelvis height variation on the hip Motion Layer channel.
+            hips_world = (
+                source.matrix_world @ source.pose.bones["Hips"].matrix
+            ).translation
+            if hips_origin is None:
+                hips_origin = hips_world.copy()
+            hips_delta_cm = (hips_world - hips_origin) * 100.0
+            if root_track is not None:
+                root_track["position_cm"].append([
+                    float(hips_delta_cm.x), float(hips_delta_cm.y), 0.0
+                ])
+            if hip_track is not None:
+                hip_track["position_cm"].append([
+                    0.0, 0.0, float(hips_delta_cm.z)
+                ])
     finally:
         bpy.context.scene.frame_set(saved_frame)
         bpy.context.view_layer.update()
@@ -274,6 +315,12 @@ def build_motion_payload(source, target_response):
         "target": target["avatar"],
         "mapped_bones": len(mappings),
         "missing_target": missing_target,
+        "root_motion_source": "Hips",
+        "root_displacement_cm": (
+            track_data["RL_BoneRoot"]["position_cm"][-1]
+            if track_data.get("RL_BoneRoot", {}).get("position_cm")
+            else [0.0, 0.0, 0.0]
+        ),
     }
 
 

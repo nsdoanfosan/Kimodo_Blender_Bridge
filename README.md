@@ -149,21 +149,22 @@ Official references:
 - [Epic: Skeletons in Unreal Engine](https://dev.epicgames.com/documentation/en-us/unreal-engine/skeletons-in-unreal-engine)
 - [Reallusion: Exporting Characters from iClone or Character Creator](https://manual.reallusion.com/CC-iC-Auto-Setup/All-in-One/1.2/02_for_Unreal/Exporting-Characters-from-iC-or-CC.htm)
 
-### Send Kimodo motion directly to iClone
+### Send Kimodo motion to iClone through official Data Link
 
-The primary workflow does not use FBX import, Data Link, Rigify, or a
-Blender-side character. The selected iClone character is the retarget target.
+The primary workflow uses **Reallusion Blender Auto Setup 2.4.0** on both sides.
+The iClone character is imported into Blender once, so Kimodo is retargeted on
+the character's actual 101-bone CC skeleton before Reallusion creates the
+iClone Motion Clip.
 
-1. Install/start the bundled **Kimodo Motion Receiver** OpenPlugin and restart iClone.
-2. In iClone, select exactly one CC character and move the playhead to the insertion frame.
-3. In Blender **Retarget**, choose the generated rig as **Source (Kimodo)**.
-4. Click **Check iClone**, then **Send Motion to iClone**.
+1. Start **Blender Pipeline / Data Link** in iClone and Blender.
+2. Select the iClone character and send it to Blender with the official plugin.
+3. In Blender **Retarget**, choose Kimodo as **Source** and the imported CC rig as **Target**.
+4. Click **Send Motion to iClone**.
 
-Blender queries the live CC Base rest hierarchy, samples the complete active
-Kimodo Action, converts the joint deltas to the character's axes, and transfers
-all frames over a token-authenticated localhost connection. iClone writes the
-frames to a temporary construction layer, flattens them into one Motion Clip,
-and verifies that Motion Layer is empty for subsequent hand editing.
+The add-on bakes the complete Kimodo Action onto the CC rig, including root
+translation, then asks the official Data Link to send the 30 fps animation
+sequence. iClone receives one ordinary Motion Clip. This avoids applying SOMA
+rotations directly through iClone HIK, which can rotate the arm and hand chains.
 
 The older **Manual FBX Fallback** remains available for offline interchange.
 It exports an animation-only FBX and companion `.3dxProfile` for iClone's
@@ -203,7 +204,7 @@ To add a constraint:
 | **Motion Segments** | Prompt list, frame ranges, Generate Selected / Generate All |
 | **Quick Generate** | Single-prompt generation with duration and seed controls |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
-| **Retarget** | Bone mapping, Apply Constraints, Bake, direct iClone Motion Clip transfer, manual FBX fallback |
+| **Retarget** | Bone mapping, CC-rig bake, official iClone Data Link transfer, manual FBX fallback |
 | **Help** | Quick-start checklist, VRAM tip |
 
 ---

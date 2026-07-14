@@ -801,11 +801,11 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
 
         layout.separator()
 
-        # Primary workflow: sample the complete Kimodo Action and let the
-        # restricted iClone receiver bake it into one Motion Clip.
+        # Primary workflow: retarget onto an imported CC rig in Blender, then
+        # use Reallusion's official Data Link sequence transfer.
         live_box = layout.box()
-        live_box.label(text="iClone Direct Motion", icon='PLAY')
-        live_box.label(text="Select one target character in iClone")
+        live_box.label(text="iClone Official Data Link", icon='PLAY')
+        live_box.label(text="Use an imported CC armature as Target")
         try:
             from . import iclone_live_send as icsend
             live_state = icsend.inspect_source(s.source_armature)
@@ -836,7 +836,7 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
             text="Send Motion to iClone",
             icon='PLAY',
         )
-        live_box.label(text="Result: one Motion Clip; Motion Layer stays editable")
+        live_box.label(text="Blender CC retarget -> official iClone Motion Clip")
         if s.iclone_live_status:
             _label_wrapped(live_box, s.iclone_live_status, context, icon='INFO')
 

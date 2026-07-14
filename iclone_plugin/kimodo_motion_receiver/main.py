@@ -11,6 +11,7 @@ import os
 import queue
 import secrets
 import socket
+import sys
 import threading
 import uuid
 
@@ -20,7 +21,7 @@ from PySide2.QtCore import QTimer
 
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
-BRIDGE_VERSION = "0.2.1"
+BRIDGE_VERSION = "0.6.3"
 HOST = "127.0.0.1"
 PORT = 18732
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -159,12 +160,14 @@ def _target_description():
     skeleton = avatar.GetSkeletonComponent()
     fps = RLPy.RGlobal.GetFps()
     scene_time = RLPy.RGlobal.GetTime()
+    active_clip = skeleton.GetClipByTime(scene_time)
     bones = []
     skin_bones = list(skeleton.GetSkinBones())
     skin_ids = {_object_id(bone): str(bone.GetName()) for bone in skin_bones}
     for bone in skin_bones:
         local_transform = bone.LocalTransform()
         basis_transform = bone.BasisTransform()
+        world_transform = bone.WorldTransform()
         parent_name = None
         try:
             parent_name = skin_ids.get(_object_id(bone.GetParent()))
@@ -177,6 +180,11 @@ def _target_description():
             "rotation": _quaternion(basis_transform.R()),
             "local_translation": _vector(local_transform.T()),
             "local_rotation": _quaternion(local_transform.R()),
+            "world_translation": _vector(world_transform.T()),
+            "world_rotation": _quaternion(world_transform.R()),
+            "transform_control_available": bool(
+                active_clip and active_clip.GetControl("Transform", bone)
+            ),
         })
     return {
         "avatar": {"id": _object_id(avatar), "name": str(avatar.GetName())},
@@ -197,6 +205,16 @@ def _finite_triplet(value, label, limit):
     return result
 
 
+def _finite_quaternion(value, label):
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError("{} must be an XYZW quaternion".format(label))
+    result = [float(number) for number in value]
+    length_sq = sum(number * number for number in result)
+    if any(not math.isfinite(number) for number in result) or length_sq < 0.25 or length_sq > 2.25:
+        raise ValueError("{} contains an invalid quaternion".format(label))
+    return result
+
+
 def _validate_motion(arguments):
     frame_count = int(arguments.get("frame_count", 0))
     source_fps = float(arguments.get("source_fps", 0.0))
@@ -210,7 +228,9 @@ def _validate_motion(arguments):
     parsed = []
     seen = set()
     for track in tracks:
-        if not isinstance(track, dict) or set(track) - {"bone", "rotation_deg", "position_cm"}:
+        if not isinstance(track, dict) or set(track) - {
+            "bone", "rotation_deg", "rotation_xyzw", "position_cm"
+        }:
             raise ValueError("A motion track has unknown fields")
         name = str(track.get("bone") or "").strip()
         if not name or len(name) > 128 or name in seen:
@@ -219,6 +239,9 @@ def _validate_motion(arguments):
         rotations = track.get("rotation_deg")
         if not isinstance(rotations, list) or len(rotations) != frame_count:
             raise ValueError("rotation_deg length does not match frame_count")
+        quaternions = track.get("rotation_xyzw")
+        if not isinstance(quaternions, list) or len(quaternions) != frame_count:
+            raise ValueError("rotation_xyzw length does not match frame_count")
         positions = track.get("position_cm")
         if positions is not None and (not isinstance(positions, list) or len(positions) != frame_count):
             raise ValueError("position_cm length does not match frame_count")
@@ -226,6 +249,9 @@ def _validate_motion(arguments):
             "bone": name,
             "rotation_deg": [
                 _finite_triplet(value, name + " rotation", 36000.0) for value in rotations
+            ],
+            "rotation_xyzw": [
+                _finite_quaternion(value, name + " rotation") for value in quaternions
             ],
             "position_cm": None if positions is None else [
                 _finite_triplet(value, name + " position", 100000.0) for value in positions
@@ -349,7 +375,8 @@ def _apply_motion(arguments, dry_run=False):
         for index in range(request["frame_count"]):
             scene_frame = start_frame + int(round(index * target_fps / request["source_fps"]))
             unique_key_frames.add(scene_frame)
-            clip_time = clip.SceneTimeToClipTime(fps.IndexedFrameTime(scene_frame))
+            scene_time = fps.IndexedFrameTime(scene_frame)
+            clip_time = clip.SceneTimeToClipTime(scene_time)
             for track, controls in resolved:
                 rotation = track["rotation_deg"][index]
                 for name, value in zip(("rx", "ry", "rz"), rotation):
@@ -362,6 +389,20 @@ def _apply_motion(arguments, dry_run=False):
                         status = controls[name].SetValue(clip_time, value)
                         if status is not None and not _status_succeeded(status):
                             raise RuntimeError("iClone rejected a Kimodo position key")
+
+            RLPy.RGlobal.SetTime(scene_time)
+            RLPy.RGlobal.ForceViewportUpdate()
+            bake_status = skeleton.BakeFkToIk(scene_time, False)
+            if bake_status is not None and not _status_succeeded(bake_status):
+                raise RuntimeError("iClone failed to preserve Kimodo FK at frame {}".format(
+                    scene_frame
+                ))
+
+        RLPy.RGlobal.SetTime(start_time)
+        RLPy.RGlobal.ForceViewportUpdate()
+        finalize_status = skeleton.BakeFkToIk(start_time, True)
+        if finalize_status is not None and not _status_succeeded(finalize_status):
+            raise RuntimeError("iClone failed to finalize Kimodo FK/IK data")
 
         temporary_key_count = int(resolved[0][1]["rx"].GetKeyCount())
         if temporary_key_count < len(unique_key_frames):
@@ -423,6 +464,24 @@ def _dispatch(operation, arguments, mode, dry_run):
         return _session_identity()
     if operation == "target.describe":
         return _target_description()
+    if operation in {"official_link.status", "official_link.start", "official_link.send_actors"}:
+        official_root = r"C:\Program Files\Reallusion\iClone 8\Bin64\OpenPlugin\Blender Pipeline Plugin"
+        if official_root not in sys.path:
+            sys.path.insert(0, official_root)
+        from btp import link as official_link
+        data_link = official_link.get_data_link()
+        if operation == "official_link.start":
+            if mode != "mutate":
+                raise ValueError("official_link.start requires mutate mode")
+            data_link.link_start()
+        elif operation == "official_link.send_actors":
+            if mode != "mutate":
+                raise ValueError("official_link.send_actors requires mutate mode")
+            data_link.send_actors()
+        return {
+            "listening": bool(data_link.is_listening()),
+            "connected": bool(data_link.is_connected()),
+        }
     if operation == "motion.apply":
         if mode != "mutate":
             raise ValueError("motion.apply requires mutate mode")

@@ -19,6 +19,7 @@ from . import subprocess_client as sc
 from . import retarget as rt
 from . import iclone_motion_export as icexport
 from . import iclone_live_send as icsend
+from . import iclone_official_send as icofficial
 from . import constraints as cmod
 from . import setup_operator as so
 
@@ -806,15 +807,18 @@ class KIMODO_OT_CheckICloneReceiver(Operator):
 
 
 class KIMODO_OT_SendMotionToIClone(Operator):
-    """Retarget the complete Kimodo Action into one iClone Motion Clip"""
+    """Retarget onto an imported CC rig and send through Reallusion Data Link"""
     bl_idname = "kimodo.send_motion_to_iclone"
     bl_label = "Send Motion to iClone"
 
     def execute(self, context):
         settings = context.scene.kimodo
         try:
-            result = icsend.send_motion(settings.source_armature)
-        except icsend.ICloneLiveSendError as exc:
+            result = icofficial.send_motion(
+                settings.source_armature,
+                settings.target_armature,
+            )
+        except icofficial.ICloneOfficialSendError as exc:
             settings.iclone_live_status = str(exc)
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
@@ -824,12 +828,10 @@ class KIMODO_OT_SendMotionToIClone(Operator):
             self.report({'ERROR'}, message)
             return {'CANCELLED'}
 
-        applied = result["result"]
-        settings.iclone_live_target = result["target"]["name"]
+        settings.iclone_live_target = result["target"]
         settings.iclone_live_status = (
-            f"Sent {result['source']['action']} to {result['target']['name']}: "
-            f"{applied['source_frames']} frames, {result['mapped_bones']} bones, "
-            "1 flattened Motion Clip"
+            f"Official Data Link: {result['action']} to {result['target']}: "
+            f"{result['source_frames']} frames, {result['mapped_bones']} bones"
         )
         self.report({'INFO'}, settings.iclone_live_status)
         return {'FINISHED'}

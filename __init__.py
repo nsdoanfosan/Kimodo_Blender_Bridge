@@ -37,6 +37,7 @@ import bpy
 
 # Sub-modules (imported after bl_info for Blender's enable/disable system)
 from . import properties, operators, ui_list, panels, constraints, timeline
+from . import pose_control
 from . import setup_operator
 from . import subprocess_client as sc
 
@@ -47,6 +48,7 @@ def register():
     setup_operator.register()
     ui_list.register()
     panels.register()
+    pose_control.register()
     timeline.register()
 
 
@@ -54,6 +56,7 @@ def unregister():
     # Kill the bridge process so we don't leave orphaned GPU processes
     sc.stop()
     timeline.unregister()
+    pose_control.unregister()
     panels.unregister()
     ui_list.unregister()
     setup_operator.unregister()

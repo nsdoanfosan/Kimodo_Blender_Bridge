@@ -315,8 +315,12 @@ class KIMODO_SceneSettings(PropertyGroup):
     connection_status: StringProperty(
         name="Status",
         default="Not started",
+        options={'SKIP_SAVE'},
     )
-    is_connected: BoolProperty(default=False)
+    is_connected: BoolProperty(
+        default=False,
+        options={'SKIP_SAVE'},
+    )
 
     # --- Generation ---
     model_type: EnumProperty(
@@ -654,13 +658,12 @@ class KIMODO_AddonPreferences(AddonPreferences):
 
 
 # ---------------------------------------------------------------------------
-# Transient-state cleanup (#43)
+# Runtime-state cleanup and resync (#43)
 # ---------------------------------------------------------------------------
-# is_generating / generation_progress are scene properties, so Blender saves
-# them into the .blend (and undo can restore them). A loaded file can never
-# have a live generation, so a saved is_generating=True would permanently
-# gray out the Generate button behind a "Cancelling…" that never finishes.
-
+# Generation and connection flags are scene properties, so Blender saves them
+# into the .blend (and undo can restore them). Generation cannot survive a file
+# load, while the module-level Kimodo subprocess deliberately does. Reconcile
+# both kinds of transient state whenever Blender changes the active file.
 def _reset_transient_generation_state() -> None:
     for scene in bpy.data.scenes:
         k = getattr(scene, "kimodo", None)
@@ -674,9 +677,29 @@ def _reset_transient_generation_state() -> None:
             k.generating_segment_index = -1
 
 
+def _sync_runtime_connection_state() -> None:
+    """Mirror the session-wide bridge state into every scene in this file.
+
+    The subprocess and loaded model live in ``subprocess_client`` module state,
+    not in a .blend. Scene properties are retained only as a compatibility/UI
+    mirror for older files and scripts.
+    """
+    from . import subprocess_client as sc
+
+    connected = sc.is_ready()
+    status = sc.get_status()
+    for scene in bpy.data.scenes:
+        k = getattr(scene, "kimodo", None)
+        if k is None:
+            continue
+        k.is_connected = connected
+        k.connection_status = status
+
+
 @bpy.app.handlers.persistent
 def _on_load_post(_filepath):
     _reset_transient_generation_state()
+    _sync_runtime_connection_state()
 
 
 def _reset_after_register():
@@ -685,6 +708,7 @@ def _reset_after_register():
     for it)."""
     try:
         _reset_transient_generation_state()
+        _sync_runtime_connection_state()
     except Exception:
         pass
     return None

@@ -12,6 +12,7 @@ stderr is left alone (Kimodo/PyTorch logging goes there).
 """
 
 import json
+import inspect
 import os
 import sys
 import tempfile
@@ -30,6 +31,65 @@ if hasattr(sys.stderr, "reconfigure"):
 def _out(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def _duration_to_frames(duration: float, fps: float) -> int:
+    """Convert a UI duration back to its intended integral frame count."""
+    return max(1, int(round(duration * fps)))
+
+
+def _call_multi_prompt_model(
+    model,
+    texts,
+    num_frames_list,
+    *,
+    constraint_lst,
+    diffusion_steps,
+    num_transition_frames,
+    seeds=None,
+):
+    """Call Kimodo multi-prompt generation across model API versions.
+
+    The currently installed Kimodo Python API used by SOMA-RP v1.1 exposes one
+    process-wide RNG seed and does not accept a ``seeds`` keyword on
+    ``Kimodo.__call__``.  Future API builds may add per-segment seeds.  Only
+    pass that keyword when the loaded model explicitly supports it (or accepts
+    arbitrary keyword arguments); otherwise the caller's first seed, already
+    applied through ``seed_everything``, keeps the combined generation
+    deterministic.
+    """
+    kwargs = {
+        "constraint_lst": constraint_lst,
+        "num_denoising_steps": diffusion_steps,
+        "num_samples": 1,
+        "multi_prompt": True,
+        "num_transition_frames": num_transition_frames,
+        "post_processing": True,
+        "return_numpy": True,
+    }
+
+    supports_seeds = False
+    try:
+        params = inspect.signature(model.__call__).parameters
+        supports_seeds = "seeds" in params or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in params.values()
+        )
+    except (TypeError, ValueError):
+        pass
+
+    if seeds and supports_seeds:
+        kwargs["seeds"] = seeds
+    elif seeds:
+        _out({
+            "status": "progress",
+            "message": (
+                "Loaded Kimodo model does not support per-segment seeds; "
+                f"using the first seed ({seeds[0]}) for the continuous sequence."
+            ),
+        })
+
+    return model(texts, num_frames_list, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +180,7 @@ def _generate(req: dict, model, device: str) -> None:
         text += "."
 
     fps: float = model.fps
-    num_frames = max(1, int(duration * fps))
+    num_frames = _duration_to_frames(duration, fps)
 
     if seed is not None:
         seed_everything(int(seed))
@@ -188,7 +248,7 @@ def _generate_multi(req: dict, model, device: str) -> None:
     texts = [p.strip() + ("" if p.strip().endswith(".") else ".") for p in prompts]
 
     fps: float = model.fps
-    num_frames_list = [max(1, int(d * fps)) for d in durations]
+    num_frames_list = [_duration_to_frames(d, fps) for d in durations]
 
     if seed is not None:
         seed_everything(int(seed))
@@ -221,16 +281,13 @@ def _generate_multi(req: dict, model, device: str) -> None:
     _out({"status": "progress",
           "message": f"Running multi-prompt diffusion ({n} segments, {diffusion_steps} steps)…"})
 
-    output = model(
+    output = _call_multi_prompt_model(
+        model,
         texts,
         num_frames_list,
         constraint_lst=constraint_lst,
-        num_denoising_steps=diffusion_steps,
-        num_samples=1,
-        multi_prompt=True,
+        diffusion_steps=diffusion_steps,
         num_transition_frames=num_transition_frames,
-        post_processing=True,
-        return_numpy=True,
         seeds=seeds,
     )
 

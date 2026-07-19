@@ -10,6 +10,8 @@ import bpy
 import json
 from bpy.types import Panel
 
+from . import subprocess_client as sc
+
 
 # ---------------------------------------------------------------------------
 # Base class — common settings
@@ -97,6 +99,44 @@ def _draw_history(layout, context, s):
     layout.operator("kimodo.clear_history", text="Clear History", icon='TRASH')
 
 
+def _is_dynamic_pose_reference(obj):
+    """True when a Full-Body armature can still change with scene evaluation."""
+    if not obj or obj.type != 'ARMATURE':
+        return False
+    if obj.parent is not None or len(obj.constraints) > 0:
+        return True
+
+    # A disposable Kimodo Pose Control rig is expected to contain its own IK /
+    # copy constraints.  The object manifest records the exact managed names so
+    # unrelated constraints still trigger the dynamic-reference warning.
+    managed_constraints = set()
+    raw_manifest = obj.get("kimodo_pose_control_manifest", "")
+    if obj.get("kimodo_pose_control_version") and raw_manifest:
+        try:
+            manifest = json.loads(raw_manifest)
+            managed_constraints = {
+                tuple(entry) for entry in manifest.get("constraints", ())
+                if isinstance(entry, list) and len(entry) == 2
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            managed_constraints = set()
+    if any(
+        (pose_bone.name, constraint.name) not in managed_constraints
+        for pose_bone in obj.pose.bones
+        for constraint in pose_bone.constraints
+    ):
+        return True
+    for owner in (obj, obj.data):
+        animation = owner.animation_data
+        if animation and (
+            animation.action is not None
+            or len(animation.nla_tracks) > 0
+            or len(animation.drivers) > 0
+        ):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Panel 1: Connection
 # ---------------------------------------------------------------------------
@@ -122,7 +162,9 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             configured_python and os.path.isfile(configured_python)
         )
 
-        running = s.is_connected
+        process_running = sc.is_running()
+        ready = sc.is_ready()
+        runtime_status = sc.get_status()
 
         # --- Auto-install section ---
         from . import setup_operator as so
@@ -232,17 +274,17 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         row = layout.row(align=True)
         row.label(text="Model:", icon='ARMATURE_DATA')
         row.prop(s, "kimodo_model", text="")
-        row.enabled = not running
+        row.enabled = not process_running
 
         # --- Offload toggle ---
         row = layout.row(align=True)
         row.prop(s, "use_offload", text="Enable Memory Offload")
-        row.enabled = not running
+        row.enabled = not process_running
 
         layout.separator(factor=0.5)
 
         # --- Start / Stop buttons ---
-        if running:
+        if process_running:
             layout.operator("kimodo.stop_kimodo",
                             text="Stop Kimodo", icon='CANCEL')
         else:
@@ -251,16 +293,15 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
 
         # --- Status ---
         status_row = layout.row()
-        if running:
-            status_row.label(text=s.connection_status, icon='CHECKMARK')
-        elif s.connection_status in ("Not started", "Stopped"):
-            status_row.label(text=s.connection_status, icon='RADIOBUT_OFF')
+        if ready:
+            status_row.label(text=runtime_status, icon='CHECKMARK')
+        elif not process_running and runtime_status in ("Not started", "Stopped"):
+            status_row.label(text=runtime_status, icon='RADIOBUT_OFF')
         else:
             # Loading or error
-            is_err = s.connection_status.startswith("Failed") or \
-                     s.connection_status.startswith("Error")
+            is_err = runtime_status.startswith(("Failed", "Error", "Bridge exited"))
             status_row.label(
-                text=s.connection_status,
+                text=runtime_status,
                 icon='ERROR' if is_err else 'TIME',
             )
 
@@ -300,7 +341,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 row.prop(prefs, "kimodo_python_executable", text="")
             else:
                 row.prop(s, "python_executable", text="")
-            row.enabled = not s.is_connected
+            row.enabled = not sc.is_running()
             col.label(text="Leave blank to use the managed install / auto-detect",
                       icon='INFO')
             col.separator(factor=0.5)
@@ -444,12 +485,12 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
 
         # Transition frames control
         trans_row = layout.row(align=True)
-        trans_row.enabled = s.is_connected and not s.is_generating
+        trans_row.enabled = sc.is_ready() and not s.is_generating
         trans_row.label(text="Transition Frames:")
         trans_row.prop(s, "num_transition_frames", text="")
 
         gen_row = layout.row(align=True)
-        gen_row.enabled = s.is_connected and not s.is_generating
+        gen_row.enabled = sc.is_ready() and not s.is_generating
         #gen_row.operator("kimodo.generate_segment",      text="Generate Selected", icon='PLAY')
         #use tpose button below
 
@@ -529,10 +570,10 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
             box = layout.box()
             box.label(text=s.generation_progress or "Working…", icon='TIME')
         else:
-            connected_icon = 'PLAY' if s.is_connected else 'UNLINKED'
+            connected_icon = 'PLAY' if sc.is_ready() else 'UNLINKED'
             row = layout.column()
             
-            row.enabled = s.is_connected
+            row.enabled = sc.is_ready()
             
             scene_fps = context.scene.render.fps / context.scene.render.fps_base
             
@@ -551,7 +592,7 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         # --- Generate N Variations ---
         layout.separator()
         var_row = layout.row(align=True)
-        var_row.enabled = s.is_connected and not s.is_generating
+        var_row.enabled = sc.is_ready() and not s.is_generating
         var_row.prop(s, "num_variations", text="Variations")
         var_row.operator(
             "kimodo.generate_variations",
@@ -606,8 +647,8 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
         if not has_fullbody:
             tip = layout.box()
             tip.label(text="Full-Body tip:", icon='INFO')
-            tip.label(text="Select an armature first, then click Full-Body.")
-            tip.label(text="Or generate once — source arm will be duplicated.")
+            tip.label(text="Select an armature, then click Full-Body.")
+            tip.label(text="A frozen pose copy is created at the current frame.")
 
         # --- Curve path waypoint sampler ---
         layout.separator()
@@ -694,6 +735,21 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
                         "kimodo.select_constraint_object",
                         text="", icon='EDITMODE_HLT',
                     ).index = i
+                    if _is_dynamic_pose_reference(obj):
+                        warning = box.row()
+                        warning.alert = True
+                        controlled = bool(
+                            obj.get("kimodo_pose_control_version")
+                            and obj.get("kimodo_pose_control_manifest")
+                        )
+                        warning.label(
+                            text=(
+                                "Keyed Pose Controls — use Bake Pose & Remove first"
+                                if controlled else
+                                "Animated reference — remove it and add Full-Body again"
+                            ),
+                            icon='ERROR',
+                        )
             else:
                 # Regular Empty picker for all other types
                 sub.prop(ci, "marker_object", text="Marker")

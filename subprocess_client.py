@@ -238,6 +238,11 @@ def is_running() -> bool:
     return proc is not None and proc.poll() is None
 
 
+def is_ready() -> bool:
+    """True only while the bridge process is alive and its model is loaded."""
+    return _ready and is_running()
+
+
 def is_busy() -> bool:
     """True while a request is in flight on the pipe (including a cancelled
     one that is still being drained in the background)."""
@@ -245,6 +250,9 @@ def is_busy() -> bool:
 
 
 def get_status() -> str:
+    proc = _proc
+    if proc is not None and proc.poll() is not None:
+        return f"Bridge exited (code {proc.returncode})"
     return _status
 
 
@@ -350,8 +358,8 @@ def generate_motion(
     Must be called from a background thread.
     Returns (success, file_path_or_error_message).
     """
-    if not is_running():
-        return False, "Kimodo is not running — click 'Start Kimodo' first."
+    if not is_ready():
+        return False, "Kimodo is not ready — wait for startup or click 'Start Kimodo'."
 
     req = {
         "cmd": "generate",
@@ -389,8 +397,8 @@ def generate_motion_multi(
     Blocks until done or error. Must be called from a background thread.
     Returns (success, file_path_or_error_message).
     """
-    if not is_running():
-        return False, "Kimodo is not running — click 'Start Kimodo' first."
+    if not is_ready():
+        return False, "Kimodo is not ready — wait for startup or click 'Start Kimodo'."
 
     req = {
         "cmd": "generate_multi",

@@ -13,15 +13,12 @@ COPY_TRANSFORMS Copy Transforms in LOCAL space (loc + rot + scale together).
                 target rig's bone lengths don't match the source.
 
 CHILD_OF        Full parent-child relationship via a Child Of constraint.
-                The inverse matrix is set to identity so the target bone
-                snaps to the source; set it manually in the UI if you need
-                a rest-pose offset.  Best for floating / weapon bones or
-                when you want exact world-space tracking.
+                Set Inverse is calculated automatically so applying the
+                constraint does not snap an offset target armature.
 
-CHILD_OF_ROTATION  Same as CHILD_OF but with only the rotation channels
-                enabled (location and scale are left off).  Useful when you
-                want the parent-child rotation tracking without inheriting
-                the source bone's position.
+CHILD_OF_ROTATION  Backward-compatible id for Local Rotation. Uses Copy
+                Rotation in LOCAL_OWNER_ORIENT space to compensate bone-axis
+                differences without changing location or scale.
 
 Baking
 -------
@@ -34,6 +31,8 @@ import bpy
 import json
 import mathutils
 import re
+
+from . import retarget_presets
 
 
 CONSTRAINT_PREFIX = "KIMODO_"   # prefix for all constraints we add
@@ -48,11 +47,13 @@ CONSTRAINT_PREFIX = "KIMODO_"   # prefix for all constraints we add
 # These are heuristic — the user can always override in the UI.
 _SOMA_BONE_MAP_HINTS = [
     # Kimodo name        # common alternatives in user rigs
-    ("Hips",            ["hips", "pelvis", "root", "Hip", "Pelvis", "mixamorig:Hips"]),
-    ("Spine",           ["spine", "Spine1", "mixamorig:Spine"]),
-    ("Spine1",          ["spine1", "spine_01", "mixamorig:Spine1"]),
-    ("Spine2",          ["spine2", "chest", "mixamorig:Spine2"]),
-    ("Neck",            ["neck", "Neck1", "mixamorig:Neck"]),
+    ("Root",            ["root", "CC_Base_BoneRoot", "RL_BoneRoot"]),
+    ("Hips",            ["hips", "pelvis", "Hip", "Pelvis", "CC_Base_Hip", "mixamorig:Hips"]),
+    ("Spine1",          ["spine", "spine_01", "CC_Base_Waist", "mixamorig:Spine"]),
+    ("Spine2",          ["spine1", "spine_02", "CC_Base_Spine01", "mixamorig:Spine1"]),
+    ("Chest",           ["spine2", "spine_03", "chest", "CC_Base_Spine02", "mixamorig:Spine2"]),
+    ("Neck1",           ["neck", "neck_01", "CC_Base_NeckTwist01", "mixamorig:Neck"]),
+    ("Neck2",           ["neck1", "neck_02", "CC_Base_NeckTwist02"]),
     ("Head",            ["head", "Head", "mixamorig:Head"]),
     ("LeftShoulder",    ["l_shoulder", "shoulder.L", "mixamorig:LeftShoulder", "LeftShoulder"]),
     ("LeftArm",         ["upper_arm.L", "l_arm", "mixamorig:LeftArm", "LeftUpArm"]),
@@ -62,12 +63,12 @@ _SOMA_BONE_MAP_HINTS = [
     ("RightArm",        ["upper_arm.R", "r_arm", "mixamorig:RightArm", "RightUpArm"]),
     ("RightForeArm",    ["forearm.R", "r_forearm", "mixamorig:RightForeArm"]),
     ("RightHand",       ["hand.R", "r_hand", "mixamorig:RightHand"]),
-    ("LeftUpLeg",       ["thigh.L", "l_thigh", "mixamorig:LeftUpLeg", "LeftThigh"]),
-    ("LeftLeg",         ["shin.L", "l_shin", "mixamorig:LeftLeg", "LeftShin"]),
+    ("LeftLeg",         ["thigh.L", "l_thigh", "thigh_l", "CC_Base_L_Thigh", "mixamorig:LeftUpLeg", "LeftThigh"]),
+    ("LeftShin",        ["shin.L", "l_shin", "calf_l", "CC_Base_L_Calf", "mixamorig:LeftLeg", "LeftShin"]),
     ("LeftFoot",        ["foot.L", "l_foot", "mixamorig:LeftFoot"]),
     ("LeftToeBase",     ["toe.L", "l_toe", "mixamorig:LeftToeBase"]),
-    ("RightUpLeg",      ["thigh.R", "r_thigh", "mixamorig:RightUpLeg", "RightThigh"]),
-    ("RightLeg",        ["shin.R", "r_shin", "mixamorig:RightLeg", "RightShin"]),
+    ("RightLeg",        ["thigh.R", "r_thigh", "thigh_r", "CC_Base_R_Thigh", "mixamorig:RightUpLeg", "RightThigh"]),
+    ("RightShin",       ["shin.R", "r_shin", "calf_r", "CC_Base_R_Calf", "mixamorig:RightLeg", "RightShin"]),
     ("RightFoot",       ["foot.R", "r_foot", "mixamorig:RightFoot"]),
     ("RightToeBase",    ["toe.R", "r_toe", "mixamorig:RightToeBase"]),
 ]
@@ -142,6 +143,27 @@ def auto_build_mapping(source_arm: bpy.types.Object,
             result.append((src_name, matched))
 
     return result
+
+
+def build_profile_mapping(source_arm: bpy.types.Object,
+                          target_arm: bpy.types.Object,
+                          profile_id: str = "AUTO") -> dict:
+    """Build an official-profile mapping filtered to bones present in both rigs."""
+    return retarget_presets.build_mapping(
+        source_arm.data.bones.keys(),
+        target_arm.data.bones.keys(),
+        profile_id,
+    )
+
+
+def detect_target_profile(target_arm: bpy.types.Object) -> str:
+    """Detect CC Base or UE5 from authoritative marker bones."""
+    return retarget_presets.detect_profile(target_arm.data.bones.keys())
+
+
+def profile_label(profile_id: str) -> str:
+    profile = retarget_presets.PROFILES.get(profile_id)
+    return profile["label"] if profile else "Unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -269,19 +291,40 @@ def _add_child_of(pbone, source_arm, src_name: str, rotation_only: bool = False)
     the source bone's current world matrix so the target bone doesn't jump
     when the constraint activates.
 
-    When *rotation_only* is True, only the rotation channels are enabled —
-    location and scale are left off so the target bone tracks the source
-    bone's rotation without inheriting its position.
+    When *rotation_only* is True, use Copy Rotation in
+    ``LOCAL_OWNER_ORIENT`` space. Blender's Child Of location-axis toggles
+    can still offset a pose bone when its armature object is away from the
+    world origin; Local Owner Orientation maps bone axes without changing
+    location.
     """
-    use_location = not rotation_only
+    if rotation_only:
+        rotation = pbone.constraints.new("COPY_ROTATION")
+        rotation.name = CONSTRAINT_PREFIX + "LocalOwnerRotation"
+        rotation.target = source_arm
+        rotation.subtarget = src_name
+        rotation.mix_mode = "REPLACE"
+        rotation.owner_space = "LOCAL"
+        rotation.target_space = "LOCAL_OWNER_ORIENT"
+        return
+
+    # Capture the evaluated source transform before adding the constraint.
+    # Blender's Set Inverse for a pose-bone owner is the source bone's world
+    # inverse multiplied by the owning armature object's world matrix.  The
+    # pose channel applies the target bone's rest/local matrix separately.
+    owner_arm = pbone.id_data
+    src_pbone = source_arm.pose.bones.get(src_name)
+    src_world = (
+        source_arm.matrix_world @ src_pbone.matrix
+        if src_pbone else None
+    )
 
     co = pbone.constraints.new("CHILD_OF")
-    co.name           = CONSTRAINT_PREFIX + ("ChildOfRotation" if rotation_only else "ChildOf")
+    co.name           = CONSTRAINT_PREFIX + "ChildOf"
     co.target         = source_arm
     co.subtarget      = src_name
-    co.use_location_x = use_location
-    co.use_location_y = use_location
-    co.use_location_z = use_location
+    co.use_location_x = True
+    co.use_location_y = True
+    co.use_location_z = True
     co.use_rotation_x = True
     co.use_rotation_y = True
     co.use_rotation_z = True
@@ -291,11 +334,15 @@ def _add_child_of(pbone, source_arm, src_name: str, rotation_only: bool = False)
 
     # Set Inverse: invert the source bone's current world matrix so the
     # target bone stays exactly where it is when the constraint first fires.
-    src_pbone = source_arm.pose.bones.get(src_name)
-    if src_pbone:
-        co.inverse_matrix = (source_arm.matrix_world @ src_pbone.matrix).inverted()
+    if src_world is not None:
+        co.inverse_matrix = src_world.inverted() @ owner_arm.matrix_world
     else:
         co.inverse_matrix = mathutils.Matrix.Identity(4)
+    # Blender 5.x creates Child Of constraints with this flag enabled.  If it
+    # remains pending, dependency-graph evaluation overwrites the matrix above
+    # and the target can jump when its armature object is offset from origin.
+    if hasattr(co, "set_inverse_pending"):
+        co.set_inverse_pending = False
 
 
 def remove_retargeting_constraints(target_arm: bpy.types.Object) -> int:
@@ -338,11 +385,16 @@ def bake_retargeted_animation(
             frame_end=frame_end,
             only_selected=False,
             visual_keying=True,
-            clear_constraints=True,
+            clear_constraints=False,
             clear_parents=False,
             use_current_action=True,
             bake_types={'POSE'},
         )
+
+        # Keep facial, control-rig, and user-authored constraints intact.
+        # NLA bake's clear_constraints option removes every constraint on the
+        # selected bones, not just the ones created by Kimodo.
+        remove_retargeting_constraints(target_arm)
 
         bpy.ops.object.mode_set(mode='OBJECT')
         return True

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "bridge_id": "kimodo.iclone.motion-receiver",
+  "bridge_version": "0.6.3",
+  "protocol_version": 1,
+  "transport": "tcp",
+  "endpoint": "127.0.0.1:18732",
+  "health_operation": "bridge.health",
+  "token_file": "%LOCALAPPDATA%\\Kimodo Blender Bridge\\bridge-token.txt",
+  "products": ["iClone"]
+}

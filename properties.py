@@ -11,6 +11,14 @@ from bpy.props import (
 from bpy.types import PropertyGroup, AddonPreferences
 
 
+def _iclone_target_items(self, context):
+    try:
+        from . import iclone_official_send
+        return iclone_official_send.avatar_enum_items()
+    except Exception:
+        return [("__NONE__", "No iClone avatars", "Refresh the iClone avatar list")]
+
+
 # ---------------------------------------------------------------------------
 # Motion segment (one prompt + time range bar in the timeline)
 # ---------------------------------------------------------------------------
@@ -247,7 +255,7 @@ class KIMODO_BoneMappingItem(PropertyGroup):
             ("COPY_ROTATION",    "Copy Rotation",    "Copy only rotation; root bone also gets Copy Location"),
             ("COPY_TRANSFORMS",  "Copy Transforms",  "Copy location + rotation + scale together"),
             ("CHILD_OF",         "Child Of",         "Full parent-child relationship; preserves rest-pose offset"),
-            ("CHILD_OF_ROTATION", "Child Of (Rotation)", "Child Of constraint with only rotation enabled (no location or scale)"),
+            ("CHILD_OF_ROTATION", "Local Rotation", "Copy rotation in Local Owner Orientation space without changing location or scale"),
         ],
         default="CHILD_OF",
     )
@@ -292,11 +300,12 @@ class KIMODO_SceneSettings(PropertyGroup):
         name="Model",
         description="Kimodo model to load into the bridge process",
         items=[
-            ("Kimodo-SOMA-RP-v1",  "Kimodo SOMA",   "Standard human SOMA skeleton (recommended)"),
+            ("Kimodo-SOMA-RP-v1.1", "Kimodo SOMA v1.1", "Latest SOMA model (recommended)"),
+            ("Kimodo-SOMA-RP-v1",  "Kimodo SOMA v1.0", "Original SOMA model"),
             ("Kimodo-SMPLX-RP-v1", "Kimodo SMPL-X (Unsupported atm)", "Extended body with hands and face"),
             ("Kimodo-G1-RP-v1",    "Kimodo G1 (Unsupported atm)",     "Unitree G1 robot skeleton"),
         ],
-        default="Kimodo-SOMA-RP-v1",
+        default="Kimodo-SOMA-RP-v1.1",
     )
     use_offload: BoolProperty(
         name="Enable Memory Offload",
@@ -306,8 +315,12 @@ class KIMODO_SceneSettings(PropertyGroup):
     connection_status: StringProperty(
         name="Status",
         default="Not started",
+        options={'SKIP_SAVE'},
     )
-    is_connected: BoolProperty(default=False)
+    is_connected: BoolProperty(
+        default=False,
+        options={'SKIP_SAVE'},
+    )
 
     # --- Generation ---
     model_type: EnumProperty(
@@ -408,6 +421,16 @@ class KIMODO_SceneSettings(PropertyGroup):
         type=bpy.types.Object,
         poll=lambda self, obj: obj.type == 'ARMATURE',
     )
+    retarget_profile: EnumProperty(
+        name="Target Profile",
+        description="Official target skeleton profile used to build the bone map",
+        items=[
+            ("AUTO", "Auto Detect", "Detect Reallusion CC Base or Unreal UE5 from marker bones"),
+            ("UNREAL_UE5", "Unreal UE5", "UE5 Manny skeleton and Reallusion Unreal UE5 Skeleton export"),
+            ("REALLUSION_CC_BASE", "Reallusion CC / iClone", "Native CC Base skeleton used by Character Creator and iClone"),
+        ],
+        default="AUTO",
+    )
     bone_mappings: CollectionProperty(type=KIMODO_BoneMappingItem)
     bone_mapping_index: IntProperty(default=0)
     retarget_root_bone: StringProperty(
@@ -417,6 +440,49 @@ class KIMODO_SceneSettings(PropertyGroup):
     )
     bake_start_frame: IntProperty(name="Start Frame", default=1, min=0)
     bake_end_frame: IntProperty(name="End Frame", default=250, min=1)
+    iclone_last_export_path: StringProperty(
+        name="Last iClone Export",
+        description="Last FBX motion file exported for iClone",
+        default="",
+        subtype='FILE_PATH',
+    )
+    iclone_export_status: StringProperty(
+        name="iClone Export Status",
+        description="Last standalone iClone motion export result",
+        default="",
+    )
+    iclone_live_target: StringProperty(
+        name="iClone Target",
+        description="Avatar registered for the current iClone project",
+        default="",
+    )
+    iclone_target_choice: EnumProperty(
+        name="iClone Avatar",
+        description="Avatar to register for the current iClone project",
+        items=_iclone_target_items,
+    )
+    iclone_project_name: StringProperty(
+        name="iClone Project",
+        default="",
+    )
+    iclone_project_path: StringProperty(
+        name="iClone Project Path",
+        default="",
+    )
+    iclone_project_session_only: BoolProperty(
+        name="Session-only iClone Target",
+        default=False,
+    )
+    iclone_project_needs_save: BoolProperty(
+        name="iClone Project Needs Save",
+        description="A new Data Link ID was assigned in memory; iClone was not saved automatically",
+        default=False,
+    )
+    iclone_live_status: StringProperty(
+        name="iClone Live Status",
+        description="Last direct iClone motion transfer result",
+        default="Not checked",
+    )
 
     # --- Motion Constraints ---
     motion_constraints: CollectionProperty(type=KIMODO_ConstraintItem)
@@ -516,6 +582,15 @@ class KIMODO_AddonPreferences(AddonPreferences):
         default="{}",
     )
 
+    kimodo_python_executable: StringProperty(
+        name="Kimodo Python",
+        description=(
+            "Persistent path to an existing Python environment with Kimodo "
+            "installed. This is separate from the managed install location."
+        ),
+        default="",
+        subtype='FILE_PATH',
+    )
     hf_token: StringProperty(
         name="HuggingFace Token",
         description=(
@@ -525,6 +600,38 @@ class KIMODO_AddonPreferences(AddonPreferences):
         ),
         default="",
         subtype='PASSWORD',
+    )
+
+    hf_cache_dir: StringProperty(
+        name="HuggingFace Cache",
+        description=(
+            "Optional HF_HOME directory used by an external Kimodo environment. "
+            "Leave blank to use the normal HuggingFace cache."
+        ),
+        default="",
+        subtype='DIR_PATH',
+    )
+
+    text_encoder_device: EnumProperty(
+        name="Text Encoder Device",
+        description="Device used for the LLM2Vec text encoder",
+        items=[
+            ("auto", "Auto", "Use Kimodo's automatic device selection"),
+            ("cpu", "CPU", "Use system RAM and preserve GPU memory"),
+            ("cuda", "CUDA", "Run the text encoder on the NVIDIA GPU"),
+        ],
+        default="cpu",
+    )
+
+    text_encoder_mode: EnumProperty(
+        name="Text Encoder Mode",
+        description="How Kimodo obtains text embeddings",
+        items=[
+            ("auto", "Auto", "Try a text-encoder service, then fall back to local"),
+            ("local", "Local", "Always load the text encoder in this process"),
+            ("api", "API", "Require a separately running text-encoder service"),
+        ],
+        default="local",
     )
 
     system_python_override: StringProperty(
@@ -551,13 +658,12 @@ class KIMODO_AddonPreferences(AddonPreferences):
 
 
 # ---------------------------------------------------------------------------
-# Transient-state cleanup (#43)
+# Runtime-state cleanup and resync (#43)
 # ---------------------------------------------------------------------------
-# is_generating / generation_progress are scene properties, so Blender saves
-# them into the .blend (and undo can restore them). A loaded file can never
-# have a live generation, so a saved is_generating=True would permanently
-# gray out the Generate button behind a "Cancelling…" that never finishes.
-
+# Generation and connection flags are scene properties, so Blender saves them
+# into the .blend (and undo can restore them). Generation cannot survive a file
+# load, while the module-level Kimodo subprocess deliberately does. Reconcile
+# both kinds of transient state whenever Blender changes the active file.
 def _reset_transient_generation_state() -> None:
     for scene in bpy.data.scenes:
         k = getattr(scene, "kimodo", None)
@@ -571,9 +677,29 @@ def _reset_transient_generation_state() -> None:
             k.generating_segment_index = -1
 
 
+def _sync_runtime_connection_state() -> None:
+    """Mirror the session-wide bridge state into every scene in this file.
+
+    The subprocess and loaded model live in ``subprocess_client`` module state,
+    not in a .blend. Scene properties are retained only as a compatibility/UI
+    mirror for older files and scripts.
+    """
+    from . import subprocess_client as sc
+
+    connected = sc.is_ready()
+    status = sc.get_status()
+    for scene in bpy.data.scenes:
+        k = getattr(scene, "kimodo", None)
+        if k is None:
+            continue
+        k.is_connected = connected
+        k.connection_status = status
+
+
 @bpy.app.handlers.persistent
 def _on_load_post(_filepath):
     _reset_transient_generation_state()
+    _sync_runtime_connection_state()
 
 
 def _reset_after_register():
@@ -582,6 +708,7 @@ def _reset_after_register():
     for it)."""
     try:
         _reset_transient_generation_state()
+        _sync_runtime_connection_state()
     except Exception:
         pass
     return None

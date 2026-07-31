@@ -125,13 +125,59 @@ After generating motion you can drive any armature from the Kimodo source:
 
 1. Open the **Retarget** panel.
 2. Set **Source** to `Kimodo_Source` and **Target** to your character rig.
-3. Click **Auto-Match Bones** — the addon fuzzy-matches Kimodo bone names against your rig.
+3. Choose **Auto Detect**, **Unreal UE5**, or **Reallusion CC / iClone**, then click **Build Profile Mapping**.
 4. Review the mapping, enable/disable pairs, choose a retarget mode per bone. Its recommended to also adjust the scale of the armature to match your character and then applying it with CTRL+A.
 5. Choose the type of constraint the plugin should use, "Child of", "Copy Rotation" etc...
 6. Click **Apply Constraints** — Blender constraint drivers are added to your rig.
 7. Click **Bake & Remove Constraints** when you are happy — keyframes are baked onto your rig and all Kimodo constraints are removed, leaving a clean, self-contained animation.
 
 Use **Save / Load Preset** to store bone mappings for a rig and reuse them later.
+
+The built-in Unreal profile targets the **UE5 Manny hierarchy** (`root`, `pelvis`,
+`spine_01`...`spine_05`) and also supports Reallusion characters exported with
+**Unreal (UE5 Skeleton)**. The native Reallusion profile targets the
+`CC_Base_*` hierarchy used by Character Creator and iClone. The built-in
+Unreal profile is UE5-only.
+
+Before applying constraints, place the source and target in matching reference
+poses. Epic recommends matching retarget poses when proportions or base poses
+differ. Reallusion users should select **Unreal (UE5 Skeleton)** during export.
+
+Official references:
+
+- [Epic: Retargeting Bipeds with IK Rig](https://dev.epicgames.com/documentation/unreal-engine/retargeting-bipeds-with-ik-rig-in-unreal-engine)
+- [Epic: Skeletons in Unreal Engine](https://dev.epicgames.com/documentation/en-us/unreal-engine/skeletons-in-unreal-engine)
+- [Reallusion: Exporting Characters from iClone or Character Creator](https://manual.reallusion.com/CC-iC-Auto-Setup/All-in-One/1.2/02_for_Unreal/Exporting-Characters-from-iC-or-CC.htm)
+
+### Send Kimodo motion to iClone through official Data Link
+
+The primary workflow uses **Reallusion Blender Auto Setup 2.4.0** on both sides.
+The iClone character is imported into Blender once, so Kimodo is retargeted on
+the character's actual 101-bone CC skeleton before Reallusion creates the
+iClone Motion Clip.
+
+1. Install the paired Kimodo integration forks of the official Blender and iClone tools.
+2. In iClone, select exactly one avatar.
+3. In Blender **Retarget**, choose the animated Kimodo rig as **Source**.
+4. Click **Send Motion to iClone**.
+
+The button starts Data Link automatically. If the selected iClone avatar is not
+already present in Blender, the paired plug-ins transfer and import its CC rig
+first. The add-on then bakes the active Kimodo Action and sends one official
+animation sequence without a separate receiver check.
+
+The add-on bakes the complete Kimodo Action onto the CC rig, including root
+translation, then asks the official Data Link to send the 30 fps animation
+sequence. iClone receives one ordinary Motion Clip. This avoids applying SOMA
+rotations directly through iClone HIK, which can rotate the arm and hand chains.
+
+The older **Manual FBX Fallback** remains available for offline interchange.
+It exports an animation-only FBX and companion `.3dxProfile` for iClone's
+**Import External Motion** command.
+
+Official reference:
+
+- [iClone 8: Importing External Motions](https://manual.reallusion.com/iClone-8/Content/ENU/8.4/50-Animation/Import-External-Motions/Import-External-Motions.htm)
 
 <img width="1233" height="839" alt="image" src="https://github.com/user-attachments/assets/d76290db-7662-4223-9cd6-7083f89b35ca" />
 
@@ -163,7 +209,7 @@ To add a constraint:
 | **Motion Segments** | Prompt list, frame ranges, Generate Selected / Generate All |
 | **Quick Generate** | Single-prompt generation with duration and seed controls |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
-| **Retarget** | Bone mapping, Apply Constraints, Bake |
+| **Retarget** | Bone mapping, CC-rig bake, official iClone Data Link transfer, manual FBX fallback |
 | **Help** | Quick-start checklist, VRAM tip |
 
 ---
@@ -199,6 +245,10 @@ To add a constraint:
 | `panels.py` | N-panel UI |
 | `constraints.py` | Converts Blender constraint markers to Kimodo JSON |
 | `retarget.py` | Applies / bakes retargeting constraints |
+| `retarget_presets.py` | Built-in Unreal UE5 and Reallusion CC/iClone skeleton maps |
+| `iclone_live_send.py` | Live CC rest-axis sampling and direct Motion Clip transfer |
+| `iclone_motion_export.py` | Standalone FBX + 3DX motion export for iClone |
+| `iclone_plugin/kimodo_motion_receiver/` | Restricted iClone OpenPlugin receiver |
 | `ui_list.py` | UIList helper for the bone mapping panel |
 | `setup_operator.py` | One-click auto-installer for Kimodo and all dependencies |
 

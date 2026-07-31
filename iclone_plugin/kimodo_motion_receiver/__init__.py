@@ -1,0 +1,1 @@
+"""Kimodo motion receiver package."""

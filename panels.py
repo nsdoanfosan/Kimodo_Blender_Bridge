@@ -10,6 +10,8 @@ import bpy
 import json
 from bpy.types import Panel
 
+from . import subprocess_client as sc
+
 
 # ---------------------------------------------------------------------------
 # Base class — common settings
@@ -97,6 +99,44 @@ def _draw_history(layout, context, s):
     layout.operator("kimodo.clear_history", text="Clear History", icon='TRASH')
 
 
+def _is_dynamic_pose_reference(obj):
+    """True when a Full-Body armature can still change with scene evaluation."""
+    if not obj or obj.type != 'ARMATURE':
+        return False
+    if obj.parent is not None or len(obj.constraints) > 0:
+        return True
+
+    # A disposable Kimodo Pose Control rig is expected to contain its own IK /
+    # copy constraints.  The object manifest records the exact managed names so
+    # unrelated constraints still trigger the dynamic-reference warning.
+    managed_constraints = set()
+    raw_manifest = obj.get("kimodo_pose_control_manifest", "")
+    if obj.get("kimodo_pose_control_version") and raw_manifest:
+        try:
+            manifest = json.loads(raw_manifest)
+            managed_constraints = {
+                tuple(entry) for entry in manifest.get("constraints", ())
+                if isinstance(entry, list) and len(entry) == 2
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            managed_constraints = set()
+    if any(
+        (pose_bone.name, constraint.name) not in managed_constraints
+        for pose_bone in obj.pose.bones
+        for constraint in pose_bone.constraints
+    ):
+        return True
+    for owner in (obj, obj.data):
+        animation = owner.animation_data
+        if animation and (
+            animation.action is not None
+            or len(animation.nla_tracks) > 0
+            or len(animation.drivers) > 0
+        ):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Panel 1: Connection
 # ---------------------------------------------------------------------------
@@ -111,7 +151,20 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         layout = self.layout
         s = context.scene.kimodo
 
-        running = s.is_connected
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            persistent_python = (prefs.kimodo_python_executable or "").strip()
+        except Exception:
+            persistent_python = ""
+        scene_python = (s.python_executable or "").strip()
+        configured_python = scene_python or persistent_python
+        configured_python_valid = bool(
+            configured_python and os.path.isfile(configured_python)
+        )
+
+        process_running = sc.is_running()
+        ready = sc.is_ready()
+        runtime_status = sc.get_status()
 
         # --- Auto-install section ---
         from . import setup_operator as so
@@ -127,7 +180,11 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.progress(factor=dl_pct, text=f"{short}  {int(dl_pct * 100)}%")
             layout.separator(factor=0.5)
 
-        elif so.install_failed() or (so.venv_exists() and not so.is_installed()):
+        elif so.install_failed() or (
+            so.venv_exists()
+            and not so.is_installed()
+            and not configured_python_valid
+        ):
             # install_failed()  → failed this session
             # venv_exists() but not is_installed() → partial venv from a
             # previous session (no sentinel file); treat it the same way.
@@ -175,7 +232,11 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                          text="Reset Venv", icon='TRASH')
             layout.separator(factor=0.5)
 
-        elif not so.is_installed() and not so.is_kimodo_venv(s.python_executable):
+        elif (
+            not so.is_installed()
+            and not configured_python_valid
+            and not so.is_kimodo_venv(scene_python)
+        ):
             box = layout.box()
             has_gpu = so.has_nvidia_gpu()
             if not has_gpu:
@@ -193,10 +254,10 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             row.enabled = has_gpu
             row.operator("kimodo.install_kimodo", icon='IMPORT')
             # Advanced overrides (Python / HF token / explicit install location).
-            self._draw_advanced(box, context, s, show_python=False)
+            self._draw_advanced(box, context, s, show_python=True)
             layout.separator(factor=0.5)
 
-        elif not s.python_executable or not os.path.isfile(s.python_executable):
+        elif not configured_python_valid and not so.managed_python():
             box = layout.box()
             box.label(text="Kimodo venv ready", icon='CHECKMARK')
             box.operator("kimodo.use_installed_kimodo", icon='CONSOLE')
@@ -213,17 +274,17 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         row = layout.row(align=True)
         row.label(text="Model:", icon='ARMATURE_DATA')
         row.prop(s, "kimodo_model", text="")
-        row.enabled = not running
+        row.enabled = not process_running
 
         # --- Offload toggle ---
         row = layout.row(align=True)
         row.prop(s, "use_offload", text="Enable Memory Offload")
-        row.enabled = not running
+        row.enabled = not process_running
 
         layout.separator(factor=0.5)
 
         # --- Start / Stop buttons ---
-        if running:
+        if process_running:
             layout.operator("kimodo.stop_kimodo",
                             text="Stop Kimodo", icon='CANCEL')
         else:
@@ -232,16 +293,15 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
 
         # --- Status ---
         status_row = layout.row()
-        if running:
-            status_row.label(text=s.connection_status, icon='CHECKMARK')
-        elif s.connection_status in ("Not started", "Stopped"):
-            status_row.label(text=s.connection_status, icon='RADIOBUT_OFF')
+        if ready:
+            status_row.label(text=runtime_status, icon='CHECKMARK')
+        elif not process_running and runtime_status in ("Not started", "Stopped"):
+            status_row.label(text=runtime_status, icon='RADIOBUT_OFF')
         else:
             # Loading or error
-            is_err = s.connection_status.startswith("Failed") or \
-                     s.connection_status.startswith("Error")
+            is_err = runtime_status.startswith(("Failed", "Error", "Bridge exited"))
             status_row.label(
-                text=s.connection_status,
+                text=runtime_status,
                 icon='ERROR' if is_err else 'TIME',
             )
 
@@ -270,20 +330,35 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             return
 
         col = box.column(align=True)
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+        except Exception:
+            prefs = None
         if show_python:
-            col.label(text="Kimodo Python:", icon='CONSOLE')
+            col.label(text="Kimodo Python (persistent):", icon='CONSOLE')
             row = col.row(align=True)
-            row.prop(s, "python_executable", text="")
-            row.enabled = not s.is_connected
-            col.label(text="Leave blank to auto-detect from PATH / sibling venv",
+            if prefs is not None:
+                row.prop(prefs, "kimodo_python_executable", text="")
+            else:
+                row.prop(s, "python_executable", text="")
+            row.enabled = not sc.is_running()
+            col.label(text="Leave blank to use the managed install / auto-detect",
                       icon='INFO')
             col.separator(factor=0.5)
 
         try:
-            prefs = context.preferences.addons[__package__].preferences
+            if prefs is None:
+                raise RuntimeError("Kimodo addon preferences are unavailable")
             col.label(text="HF Token (optional — set if model downloads stall):",
                       icon='LOCKED')
             col.prop(prefs, "hf_token", text="")
+            col.label(text="HuggingFace cache (optional HF_HOME):",
+                      icon='FILE_FOLDER')
+            col.prop(prefs, "hf_cache_dir", text="")
+            col.label(text="Text encoder:", icon='MEMORY')
+            row = col.row(align=True)
+            row.prop(prefs, "text_encoder_device", text="Device")
+            row.prop(prefs, "text_encoder_mode", text="Mode")
             col.label(text="System Python 3.10–3.12 (override auto-detect):",
                       icon='CONSOLE')
             col.prop(prefs, "system_python_override", text="")
@@ -410,12 +485,12 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
 
         # Transition frames control
         trans_row = layout.row(align=True)
-        trans_row.enabled = s.is_connected and not s.is_generating
+        trans_row.enabled = sc.is_ready() and not s.is_generating
         trans_row.label(text="Transition Frames:")
         trans_row.prop(s, "num_transition_frames", text="")
 
         gen_row = layout.row(align=True)
-        gen_row.enabled = s.is_connected and not s.is_generating
+        gen_row.enabled = sc.is_ready() and not s.is_generating
         #gen_row.operator("kimodo.generate_segment",      text="Generate Selected", icon='PLAY')
         #use tpose button below
 
@@ -495,10 +570,10 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
             box = layout.box()
             box.label(text=s.generation_progress or "Working…", icon='TIME')
         else:
-            connected_icon = 'PLAY' if s.is_connected else 'UNLINKED'
+            connected_icon = 'PLAY' if sc.is_ready() else 'UNLINKED'
             row = layout.column()
             
-            row.enabled = s.is_connected
+            row.enabled = sc.is_ready()
             
             scene_fps = context.scene.render.fps / context.scene.render.fps_base
             
@@ -517,7 +592,7 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         # --- Generate N Variations ---
         layout.separator()
         var_row = layout.row(align=True)
-        var_row.enabled = s.is_connected and not s.is_generating
+        var_row.enabled = sc.is_ready() and not s.is_generating
         var_row.prop(s, "num_variations", text="Variations")
         var_row.operator(
             "kimodo.generate_variations",
@@ -572,8 +647,8 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
         if not has_fullbody:
             tip = layout.box()
             tip.label(text="Full-Body tip:", icon='INFO')
-            tip.label(text="Select an armature first, then click Full-Body.")
-            tip.label(text="Or generate once — source arm will be duplicated.")
+            tip.label(text="Select an armature, then click Full-Body.")
+            tip.label(text="A frozen pose copy is created at the current frame.")
 
         # --- Curve path waypoint sampler ---
         layout.separator()
@@ -660,6 +735,21 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
                         "kimodo.select_constraint_object",
                         text="", icon='EDITMODE_HLT',
                     ).index = i
+                    if _is_dynamic_pose_reference(obj):
+                        warning = box.row()
+                        warning.alert = True
+                        controlled = bool(
+                            obj.get("kimodo_pose_control_version")
+                            and obj.get("kimodo_pose_control_manifest")
+                        )
+                        warning.label(
+                            text=(
+                                "Keyed Pose Controls — use Bake Pose & Remove first"
+                                if controlled else
+                                "Animated reference — remove it and add Full-Body again"
+                            ),
+                            icon='ERROR',
+                        )
             else:
                 # Regular Empty picker for all other types
                 sub.prop(ci, "marker_object", text="Marker")
@@ -707,7 +797,22 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         box.label(text="Armatures", icon='ARMATURE_DATA')
         box.prop(s, "source_armature", text="Source (Kimodo)")
         box.prop(s, "target_armature", text="Target (Your Rig)")
-        box.prop(s, "retarget_root_bone", text="Root Bone")
+        box.prop(s, "retarget_profile", text="Target Profile")
+        if s.target_armature and s.retarget_profile == "AUTO":
+            try:
+                from . import retarget as rt
+                detected_id = rt.detect_target_profile(s.target_armature)
+                detected_label = rt.profile_label(detected_id) if detected_id else "Unknown humanoid"
+            except Exception:
+                detected_label = "Unknown humanoid"
+            box.label(text=f"Detected: {detected_label}", icon='INFO')
+        if s.target_armature:
+            box.prop_search(
+                s, "retarget_root_bone", s.target_armature.data, "bones",
+                text="Root Bone",
+            )
+        else:
+            box.prop(s, "retarget_root_bone", text="Root Bone")
 
         layout.separator()
 
@@ -716,9 +821,9 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         layout.label(text="Link toggle = target bone's Inherit Rotation", icon='LINKED')
 
         if s.source_armature and s.target_armature:
-            # Auto-match button
+            # Official target profile first, name heuristics only as fallback.
             layout.operator("kimodo.auto_map_bones",
-                            text="Auto-Match Bones", icon='SHADERFX')
+                            text="Build Profile Mapping", icon='SHADERFX')
 
         row = layout.row()
         row.template_list(
@@ -749,6 +854,129 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         row.prop(s, "bake_end_frame",   text="End")
         box.operator("kimodo.bake_retargeting",
                      text="Bake & Remove Constraints", icon='NLA_PUSHDOWN')
+
+        layout.separator()
+
+        # Primary workflow: retarget onto an imported CC rig in Blender, then
+        # use Reallusion's official Data Link sequence transfer.
+        live_box = layout.box()
+        live_box.label(text="iClone Official Data Link", icon='PLAY')
+        live_box.label(text="Targets are registered per iClone project in Blender")
+        if s.iclone_project_name:
+            live_box.label(text=f"Project: {s.iclone_project_name}", icon='FILE_BLEND')
+        if s.iclone_project_session_only:
+            _label_wrapped(
+                live_box,
+                "Default or unsaved iClone project: target registration lasts for this session only.",
+                context,
+                icon='INFO',
+            )
+        if s.iclone_project_needs_save:
+            _label_wrapped(
+                live_box,
+                "A new Link ID is only in memory. Save the iClone project manually to keep it.",
+                context,
+                icon='ERROR',
+            )
+
+        try:
+            from . import iclone_official_send as icofficial
+            catalog_avatars = list(icofficial.current_catalog().get("actors") or [])
+        except Exception:
+            catalog_avatars = []
+        if catalog_avatars:
+            live_box.prop(s, "iclone_target_choice", text="Target")
+        target_row = live_box.row(align=True)
+        target_row.operator(
+            "kimodo.refresh_iclone_targets",
+            text="Refresh",
+            icon='FILE_REFRESH',
+        )
+        change_col = target_row.column(align=True)
+        change_col.enabled = bool(catalog_avatars)
+        change_col.operator(
+            "kimodo.set_iclone_target",
+            text="Use / Change Target",
+            icon='LINKED',
+        )
+        try:
+            from . import iclone_live_send as icsend
+            live_state = icsend.inspect_source(s.source_armature)
+        except Exception:
+            live_state = {"ready": False, "action": "", "frame_count": 0, "missing_required": []}
+
+        if live_state.get("action"):
+            live_box.label(
+                text=f"Action: {live_state['action']} | {live_state['frame_count']} frames",
+                icon='ACTION',
+            )
+        elif s.source_armature:
+            live_box.label(text="Source has no active Action", icon='ERROR')
+        else:
+            live_box.label(text="Choose Source (Kimodo) above", icon='INFO')
+        if live_state.get("missing_required"):
+            live_box.label(
+                text="Missing: " + ", ".join(live_state["missing_required"]),
+                icon='ERROR',
+            )
+
+        send_col = live_box.column()
+        send_col.enabled = bool(live_state.get("ready"))
+        send_col.operator(
+            "kimodo.send_motion_to_iclone",
+            text="Send Motion to iClone",
+            icon='PLAY',
+        )
+        live_box.label(text="Usual flow: Send -> CC retarget -> Motion Clip")
+        if s.iclone_live_status:
+            _label_wrapped(live_box, s.iclone_live_status, context, icon='INFO')
+
+        layout.separator()
+
+        # Manual file fallback for offline transfer.
+        ic_box = layout.box()
+        ic_box.label(text="Manual FBX Fallback", icon='EXPORT')
+        try:
+            from . import iclone_motion_export as icexport
+            ic_state = icexport.inspect_source(s.source_armature)
+        except Exception:
+            ic_state = {"ready": False, "action": "", "missing_required": []}
+
+        if s.source_armature:
+            if ic_state.get("action"):
+                ic_box.label(text=f"Action: {ic_state['action']}", icon='ACTION')
+                ic_box.label(
+                    text=(
+                        f"Frames: {ic_state['frame_start']}-{ic_state['frame_end']} | "
+                        f"HIK bones: {ic_state['mapped_bones']}"
+                    )
+                )
+            else:
+                ic_box.label(text="Source has no active Action", icon='ERROR')
+            if ic_state.get("missing_required"):
+                _label_wrapped(
+                    ic_box,
+                    "Missing SOMA bones: " + ", ".join(ic_state["missing_required"]),
+                    context,
+                    icon='ERROR',
+                )
+        else:
+            ic_box.label(text="Choose Source (Kimodo) above", icon='INFO')
+
+        export_col = ic_box.column()
+        export_col.enabled = bool(ic_state.get("ready"))
+        export_col.operator(
+            "kimodo.export_iclone_motion",
+            text="Export FBX + 3DX Profile",
+            icon='EXPORT',
+        )
+        ic_box.label(text="Offline fallback: import manually in iClone")
+        ic_box.label(text="Load the companion .3dxProfile; Root Bone: Root")
+
+        if s.iclone_last_export_path:
+            _label_wrapped(ic_box, s.iclone_last_export_path, context, icon='FILE')
+        if s.iclone_export_status:
+            _label_wrapped(ic_box, s.iclone_export_status, context, icon='INFO')
 
         layout.separator()
 

@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.7.0] - 2026-07-14
+
+### Added
+
+- **One-click iClone handoff**: `Send Motion to iClone` now starts the forked official Data Link, requests the one avatar selected in iClone when its CC rig is not already in Blender, retargets the active Kimodo Action, and sends one official animation sequence.
+- **Coordinated official forks**: The workflow uses the paired `nsdoanfosan/cc_blender_tools` and `nsdoanfosan/CCiC-Blender-Pipeline-Plugin` forks based on upstream 2.4.2.
+
+### Changed
+
+- The primary UI no longer requires the legacy Kimodo receiver check before sending.
+
+## [1.6.1] - 2026-07-14
+
+### Changed
+
+- **Official iClone motion handoff**: Kimodo motion is now baked onto the actual CC armature imported by Reallusion Blender Auto Setup, then transferred with the official Data Link animation sequence.
+- **CC-space retargeting before transfer**: Root travel and all mapped body/finger rotations are authored in Blender on the 101-bone CC skeleton, avoiding the arm/hand distortion caused by direct SOMA-to-HIK baking in iClone.
+
+### Added
+
+- The bundled iClone receiver can start and inspect Reallusion's Blender Pipeline Data Link service for the integrated workflow.
+
+## [1.6.0] - 2026-07-14
+
+### Added
+
+- **Direct iClone Motion Clip transfer**: The Retarget panel sends the complete active Kimodo Action to the one selected iClone character without FBX import, Data Link, Rigify, or a Blender-side character. The bundled restricted OpenPlugin receives only bounded FK tracks on localhost.
+- **Clean iClone animation structure**: Incoming per-frame keys are temporary construction data. The receiver immediately flattens them into one base Motion Clip and verifies that Motion Layer contains no remaining keys, leaving it available for later corrections.
+- **Live CC rest-axis retargeting**: Blender queries the selected avatar's CC Base hierarchy and rest-axis transforms before sampling, maps SOMA joints (including fingers), preserves root translation, and inserts the clip at iClone's current frame.
+
+### Fixed
+
+- iClone clips are end-exclusive; the receiver reserves one frame after the final sample so flattening cannot discard the last pose.
+- Creating a clip at an empty insertion frame now handles `RISkeletonComponent.AddClip` correctly as an `RIClip` return value.
+
 ## [1.5.6] — 2026-07-06
 
 ### Added

@@ -13,9 +13,13 @@ import random
 import time
 from bpy.types import Operator
 from bpy.props import StringProperty, BoolProperty, IntProperty
+from bpy_extras.io_utils import ExportHelper
 
 from . import subprocess_client as sc
 from . import retarget as rt
+from . import iclone_motion_export as icexport
+from . import iclone_live_send as icsend
+from . import iclone_official_send as icofficial
 from . import constraints as cmod
 from . import setup_operator as so
 
@@ -164,6 +168,107 @@ def _reset_start_state():
     _start_state.update(running=False, done=False, success=False, message="")
 
 
+# PARK keeps the canonical Kimodo checkout, venv, and Hugging Face cache under
+# D:\kimodo.  Older Blender preferences and .blend files may still contain a
+# copied Codex-workspace path.  Those paths can remain valid on disk, so an
+# existence check alone is not enough: explicitly recognize the legacy copy
+# and migrate it every time the bridge starts.
+_LOCAL_KIMODO_ROOT = os.environ.get("KIMODO_LOCAL_ROOT", r"D:\kimodo")
+_LOCAL_KIMODO_PYTHON = os.path.join(
+    _LOCAL_KIMODO_ROOT, "kimodo-source", ".venv", "Scripts", "python.exe"
+)
+_LOCAL_HF_HOME = os.path.join(_LOCAL_KIMODO_ROOT, "kimodo-cache")
+
+
+def _normalized_user_path(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        value = bpy.path.abspath(os.path.expanduser(value))
+    except Exception:
+        pass
+    return os.path.normcase(os.path.abspath(value))
+
+
+def _is_legacy_codex_path(value: str) -> bool:
+    normalized = _normalized_user_path(value)
+    return "\\documents\\codex\\" in normalized
+
+
+def _heal_local_kimodo_paths(context) -> dict:
+    """Migrate stale Codex-workspace connection settings to D:\\kimodo.
+
+    The returned values are the paths that the current start attempt must use,
+    so the fix works even if Blender fails to persist preferences on shutdown.
+    Valid custom paths outside the old Codex workspace remain untouched.
+    """
+    try:
+        prefs = context.preferences.addons[__package__].preferences
+    except Exception:
+        prefs = None
+
+    scene_settings = context.scene.kimodo
+    pref_changed = False
+    scene_changed = False
+
+    # Preserve the canonical spelling shown in Blender's UI. Normalization is
+    # used only for comparisons; os.path.normcase() would otherwise rewrite
+    # the stored Windows path to lower case.
+    local_python = os.path.abspath(os.path.expanduser(_LOCAL_KIMODO_PYTHON))
+    local_hf_home = os.path.abspath(os.path.expanduser(_LOCAL_HF_HOME))
+
+    if os.path.isfile(local_python):
+        scene_python = (scene_settings.python_executable or "").strip()
+        if scene_python and (
+            _is_legacy_codex_path(scene_python)
+            or not os.path.isfile(_normalized_user_path(scene_python))
+        ):
+            scene_settings.python_executable = local_python
+            scene_changed = True
+
+        if prefs is not None:
+            pref_python = (prefs.kimodo_python_executable or "").strip()
+            if (
+                not pref_python
+                or _is_legacy_codex_path(pref_python)
+                or not os.path.isfile(_normalized_user_path(pref_python))
+            ):
+                prefs.kimodo_python_executable = local_python
+                pref_changed = True
+
+    if prefs is not None and os.path.isdir(local_hf_home):
+        pref_hf_home = (prefs.hf_cache_dir or "").strip()
+        if (
+            not pref_hf_home
+            or _is_legacy_codex_path(pref_hf_home)
+            or not os.path.isdir(_normalized_user_path(pref_hf_home))
+        ):
+            prefs.hf_cache_dir = local_hf_home
+            pref_changed = True
+
+    if pref_changed:
+        try:
+            bpy.ops.wm.save_userpref()
+        except Exception:
+            pass
+
+    python_hint = (scene_settings.python_executable or "").strip()
+    if not python_hint and prefs is not None:
+        python_hint = (prefs.kimodo_python_executable or "").strip()
+
+    hf_home = ""
+    if prefs is not None:
+        hf_home = (prefs.hf_cache_dir or "").strip()
+
+    return {
+        "prefs": prefs,
+        "python": python_hint,
+        "hf_home": hf_home,
+        "pref_changed": pref_changed,
+        "scene_changed": scene_changed,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Connection operators
 # ---------------------------------------------------------------------------
@@ -176,11 +281,18 @@ class KIMODO_OT_StartKimodo(Operator):
     _timer  = None
     _thread = None
 
-    def _run_start(self, python_exe: str, model_name: str, use_offload: bool):
+    def _run_start(self, python_exe: str, model_name: str, use_offload: bool,
+                   env_overrides: "dict | None" = None):
         def progress(msg):
             _start_state["message"] = msg
 
-        success, msg = sc.start(python_exe, model_name, use_offload=use_offload, progress_callback=progress)
+        success, msg = sc.start(
+            python_exe,
+            model_name,
+            use_offload=use_offload,
+            progress_callback=progress,
+            env_overrides=env_overrides,
+        )
         _start_state["success"] = success
         _start_state["message"] = msg
         _start_state["done"]    = True
@@ -190,27 +302,61 @@ class KIMODO_OT_StartKimodo(Operator):
         s = context.scene.kimodo
 
         if sc.is_running():
-            self.report({'INFO'}, "Kimodo is already running.")
-            return {'CANCELLED'}
+            # Opening another .blend replaces scene properties, but the
+            # session-wide subprocess and loaded model remain alive. Treat a
+            # repeated Start as an idempotent state refresh, not an error.
+            s.is_connected = sc.is_ready()
+            s.connection_status = sc.get_status()
+            message = (
+                "Kimodo is already running and ready."
+                if sc.is_ready()
+                else "Kimodo is already starting."
+            )
+            self.report({'INFO'}, message)
+            return {'FINISHED'}
 
         _reset_start_state()
         _start_state["running"] = True
         s.is_connected      = False
         s.connection_status = "Starting…"
 
-        # Resolve the Python hint on the main thread. When the scene has no
-        # explicit path, fall back to the remembered managed-venv location
-        # (addon preference) so a fresh scene still finds the install.
-        python_hint = (s.python_executable or "").strip()
+        # Resolve and self-heal the Python/HF paths on the main thread. This
+        # deliberately fixes legacy Codex-workspace values on every start, not
+        # only when Blender happens to persist its preferences successfully.
+        healed_paths = _heal_local_kimodo_paths(context)
+        prefs = healed_paths["prefs"]
+        python_hint = healed_paths["python"]
         if not python_hint:
             try:
                 python_hint = so.managed_python()
             except Exception:
                 python_hint = ""
 
+        # External Kimodo environments may keep their HuggingFace cache away
+        # from the user's default profile. Resolve these Blender preferences on
+        # the main thread, then pass a plain dict to the worker thread.
+        env_overrides = {}
+        try:
+            if prefs is None:
+                raise RuntimeError("Kimodo addon preferences are unavailable")
+            hf_home = healed_paths["hf_home"]
+            if hf_home:
+                hf_home = os.path.abspath(
+                    bpy.path.abspath(os.path.expanduser(hf_home))
+                )
+                env_overrides["HF_HOME"] = hf_home
+                env_overrides["HUGGINGFACE_CACHE_DIR"] = os.path.join(hf_home, "hub")
+            if prefs.text_encoder_device != "auto":
+                env_overrides["TEXT_ENCODER_DEVICE"] = prefs.text_encoder_device
+            env_overrides["TEXT_ENCODER_MODE"] = prefs.text_encoder_mode
+            env_overrides["HF_HUB_DISABLE_XET"] = "1"
+            env_overrides["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        except Exception:
+            pass
+
         self._thread = threading.Thread(
             target=self._run_start,
-            args=(python_hint, s.kimodo_model, s.use_offload),
+            args=(python_hint, s.kimodo_model, s.use_offload, env_overrides),
             daemon=True,
         )
         self._thread.start()
@@ -303,8 +449,8 @@ class KIMODO_OT_Generate(Operator):
     def invoke(self, context, event):
         s = context.scene.kimodo
 
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not sc.is_ready():
+            self.report({'WARNING'}, "Kimodo is not ready — wait for startup or click 'Start Kimodo'.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -589,7 +735,7 @@ class KIMODO_OT_ImportBVH(Operator):
 # ---------------------------------------------------------------------------
 
 class KIMODO_OT_AutoMapBones(Operator):
-    """Auto-match bone names between Kimodo source and target armature"""
+    """Build a target-profile mapping, then fall back to name heuristics"""
     bl_idname = "kimodo.auto_map_bones"
     bl_label = "Auto-Match Bones"
 
@@ -602,16 +748,45 @@ class KIMODO_OT_AutoMapBones(Operator):
             self.report({'ERROR'}, "Set the Target Armature first.")
             return {'CANCELLED'}
 
-        pairs = rt.auto_build_mapping(s.source_armature, s.target_armature, s.model_type)
+        profile_result = rt.build_profile_mapping(
+            s.source_armature,
+            s.target_armature,
+            s.retarget_profile,
+        )
         s.bone_mappings.clear()
 
+        if profile_result["mappings"]:
+            for pair in profile_result["mappings"]:
+                item = s.bone_mappings.add()
+                item.source_bone = pair["src"]
+                item.target_bone = pair["tgt"]
+                item.enabled = True
+                item.retarget_mode = pair["mode"]
+                item.inherit_rotation = pair["inherit_rot"]
+            s.retarget_root_bone = profile_result["root"]
+            missing = len(profile_result["missing_target"])
+            suffix = f"; {missing} optional target bones absent" if missing else ""
+            self.report({"INFO"}, (
+                f"Built {profile_result['label']} mapping: "
+                f"{len(profile_result['mappings'])} pairs{suffix}"
+            ))
+            return {'FINISHED'}
+
+        if s.retarget_profile != "AUTO":
+            self.report({'ERROR'}, "The selected target profile has no compatible bone pairs.")
+            return {'CANCELLED'}
+
+        pairs = rt.auto_build_mapping(s.source_armature, s.target_armature, s.model_type)
         for src, tgt in pairs:
             item = s.bone_mappings.add()
             item.source_bone = src
             item.target_bone = tgt
             item.enabled = True
+            item.retarget_mode = (
+                "CHILD_OF" if src == "Root" else "CHILD_OF_ROTATION"
+            )
 
-        self.report({'INFO'}, f"Auto-matched {len(pairs)} bone pairs")
+        self.report({'INFO'}, f"No official profile detected; heuristically matched {len(pairs)} pairs")
         return {'FINISHED'}
 
 
@@ -712,6 +887,333 @@ class KIMODO_OT_BakeRetargeting(Operator):
         else:
             self.report({'ERROR'}, "Bake failed — check console for details")
         return {'FINISHED'} if success else {'CANCELLED'}
+
+
+def _iclone_catalog_message(resolution, catalog):
+    project = catalog.get("project") or {}
+    name = str(project.get("name") or "iClone project")
+    status = resolution["status"]
+    if status == "empty":
+        message = f"{name}: no avatars found"
+    elif status == "choose":
+        message = f"{name}: choose an avatar below, then use Change Target"
+    elif status == "stale":
+        old_name = str((resolution.get("binding") or {}).get("avatar_name") or "saved target")
+        message = f"{name}: {old_name} is no longer available; choose a target again"
+    else:
+        avatar = resolution.get("avatar") or {}
+        verb = "Auto-registered" if status == "auto" else "Registered"
+        message = f"{verb}: {avatar.get('name', 'iClone avatar')} for {name}"
+    if project.get("session_only"):
+        message += ". Session only: save as a named iClone project for persistent registration"
+    if catalog.get("project_needs_save"):
+        message += ". New Link ID is in memory; save the iClone project manually to keep it"
+    return message
+
+
+class KIMODO_OT_CheckICloneReceiver(Operator):
+    """Verify the selected iClone avatar and Kimodo motion receiver"""
+    bl_idname = "kimodo.check_iclone_receiver"
+    bl_label = "Check iClone"
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            target = icsend.inspect_connection()
+        except icsend.ICloneLiveSendError as exc:
+            settings.iclone_live_status = str(exc)
+            settings.iclone_live_target = ""
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        settings.iclone_live_target = target["avatar_name"]
+        settings.iclone_live_status = (
+            f"Connected: {target['avatar_name']} | {target['bone_count']} bones | "
+            f"insert frame {target['current_frame']}"
+        )
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
+
+
+class KIMODO_OT_RefreshICloneTargets(Operator):
+    """Refresh the current iClone project and avatar catalog"""
+    bl_idname = "kimodo.refresh_iclone_targets"
+    bl_label = "Refresh iClone Targets"
+
+    _timer = None
+    _started_at = 0.0
+    _request_sent = False
+
+    def _finish_timer(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+
+    def _fail(self, context, message):
+        self._finish_timer(context)
+        context.scene.kimodo.iclone_live_status = message
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+    def _advance(self, context):
+        settings = context.scene.kimodo
+        if not icofficial.is_link_connected():
+            settings.iclone_live_status = "Starting official Data Link..."
+            return None
+        if not self._request_sent:
+            icofficial.request_iclone_catalog()
+            self._request_sent = True
+            settings.iclone_live_status = "Refreshing iClone project avatars..."
+            return None
+        state = icofficial.iclone_catalog_state()
+        if state["error"]:
+            raise icofficial.ICloneOfficialSendError(state["error"])
+        if not state["received"]:
+            return None
+        catalog = state["catalog"]
+        resolution = icofficial.resolve_catalog_target(settings, catalog)
+        settings.iclone_live_status = _iclone_catalog_message(resolution, catalog)
+        self._finish_timer(context)
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
+
+    def execute(self, context):
+        self._started_at = time.monotonic()
+        self._request_sent = False
+        try:
+            icofficial.begin_one_click_session()
+            immediate = self._advance(context)
+            if immediate is not None:
+                return immediate
+        except Exception as exc:
+            return self._fail(context, f"iClone refresh failed: {exc}")
+        self._timer = context.window_manager.event_timer_add(0.25, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            return self._fail(context, "iClone refresh cancelled")
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        if time.monotonic() - self._started_at > 60.0:
+            return self._fail(context, "Timed out waiting for iClone Data Link")
+        try:
+            result = self._advance(context)
+            return result if result is not None else {'RUNNING_MODAL'}
+        except Exception as exc:
+            return self._fail(context, f"iClone refresh failed: {exc}")
+
+
+class KIMODO_OT_SetICloneTarget(Operator):
+    """Register the chosen avatar for the catalog's iClone project"""
+    bl_idname = "kimodo.set_iclone_target"
+    bl_label = "Use / Change iClone Target"
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            result = icofficial.bind_selected_target(settings)
+        except Exception as exc:
+            settings.iclone_live_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        project = result["project"]
+        avatar = result["avatar"]
+        scope = "for this session" if project.get("session_only") else "for this iClone project"
+        settings.iclone_live_status = f"Target changed to {avatar['name']} {scope}"
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
+
+
+class KIMODO_OT_SendMotionToIClone(Operator):
+    """Resolve the registered iClone target and send one Kimodo Motion Clip"""
+    bl_idname = "kimodo.send_motion_to_iclone"
+    bl_label = "Send Motion to iClone"
+
+    _timer = None
+    _started_at = 0.0
+    _catalog_sent = False
+    _target_sent = False
+    _source = None
+    _target = None
+
+    def _finish_timer(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+
+    def _fail(self, context, message):
+        self._finish_timer(context)
+        context.scene.kimodo.iclone_live_status = message
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+    def _pause_for_target(self, context, message):
+        self._finish_timer(context)
+        context.scene.kimodo.iclone_live_status = message
+        self.report({'INFO'}, message)
+        return {'CANCELLED'}
+
+    def _advance(self, context):
+        settings = context.scene.kimodo
+        if not icofficial.is_link_connected():
+            settings.iclone_live_status = "Starting official Data Link..."
+            return None
+
+        if not self._catalog_sent:
+            icofficial.request_iclone_catalog()
+            self._catalog_sent = True
+            settings.iclone_live_status = "Checking the current iClone project..."
+            return None
+        if not self._target_sent:
+            state = icofficial.iclone_catalog_state()
+            if state["error"]:
+                raise icofficial.ICloneOfficialSendError(state["error"])
+            if not state["received"]:
+                return None
+            catalog = state["catalog"]
+            resolution = icofficial.resolve_catalog_target(settings, catalog)
+            if resolution["status"] in {"empty", "choose", "stale"}:
+                return self._pause_for_target(
+                    context,
+                    _iclone_catalog_message(resolution, catalog),
+                )
+            avatar = resolution["avatar"]
+            project = catalog.get("project") or {}
+            self._target = icofficial.find_registered_target(
+                self._source,
+                avatar.get("link_id"),
+                settings.target_armature,
+            )
+            if self._target is None:
+                icofficial.request_exact_iclone_target(
+                    project.get("key"), avatar.get("link_id")
+                )
+            self._target_sent = True
+            if self._target is None:
+                settings.iclone_live_status = (
+                    f"Preparing {avatar.get('name', 'iClone avatar')}..."
+                )
+                return None
+
+        target = self._target
+        if target is None:
+            request = icofficial.requested_target_state()
+            if request["error"]:
+                raise icofficial.ICloneOfficialSendError(request["error"])
+            target = request["target"]
+            if target is None:
+                name = request["target_name"] or "registered avatar"
+                settings.iclone_live_status = f"Importing {name} from iClone..."
+                return None
+            self._target = target
+
+        settings.target_armature = target
+        result = icofficial.send_motion(self._source, target)
+        settings.iclone_live_target = result["target"]
+        settings.iclone_live_status = (
+            f"Official Data Link: {result['action']} to {result['target']}: "
+            f"{result['source_frames']} frames, {result['mapped_bones']} bones"
+        )
+        self._finish_timer(context)
+        self.report({'INFO'}, settings.iclone_live_status)
+        return {'FINISHED'}
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        self._source = settings.source_armature
+        self._catalog_sent = False
+        self._target_sent = False
+        self._target = None
+        self._started_at = time.monotonic()
+        try:
+            if not self._source or self._source.type != 'ARMATURE':
+                raise icofficial.ICloneOfficialSendError(
+                    "Choose the animated Kimodo source armature"
+                )
+            if not self._source.animation_data or not self._source.animation_data.action:
+                raise icofficial.ICloneOfficialSendError(
+                    "The Kimodo source has no active Action"
+                )
+            icofficial.begin_one_click_session()
+            immediate = self._advance(context)
+            if immediate is not None:
+                return immediate
+        except icofficial.ICloneOfficialSendError as exc:
+            return self._fail(context, str(exc))
+        except Exception as exc:
+            return self._fail(context, f"iClone transfer failed: {exc}")
+
+        self._timer = context.window_manager.event_timer_add(
+            0.25,
+            window=context.window,
+        )
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            return self._fail(context, "iClone transfer cancelled")
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        if time.monotonic() - self._started_at > 300.0:
+            return self._fail(context, "Timed out waiting for iClone Data Link")
+        try:
+            result = self._advance(context)
+            return result if result is not None else {'RUNNING_MODAL'}
+        except icofficial.ICloneOfficialSendError as exc:
+            return self._fail(context, str(exc))
+        except Exception as exc:
+            return self._fail(context, f"iClone transfer failed: {exc}")
+
+
+class KIMODO_OT_ExportICloneMotion(Operator, ExportHelper):
+    """Export the active Kimodo Action for iClone without Data Link"""
+    bl_idname = "kimodo.export_iclone_motion"
+    bl_label = "Export iClone Motion"
+
+    filename_ext = ".fbx"
+    filter_glob: StringProperty(default="*.fbx", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        settings = context.scene.kimodo
+        source = settings.source_armature
+        state = icexport.inspect_source(source)
+        name = bpy.path.clean_name(state["action"] or "Kimodo_Motion")
+        previous = settings.iclone_last_export_path
+        if previous:
+            directory = os.path.dirname(previous)
+        elif settings.last_bvh_path:
+            directory = os.path.dirname(settings.last_bvh_path)
+        else:
+            directory = bpy.path.abspath("//")
+        self.filepath = os.path.join(directory, name + self.filename_ext)
+        return ExportHelper.invoke(self, context, event)
+
+    def execute(self, context):
+        settings = context.scene.kimodo
+        try:
+            result = icexport.export_motion(
+                settings.source_armature,
+                self.filepath,
+            )
+        except icexport.ICloneMotionExportError as exc:
+            settings.iclone_export_status = str(exc)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        except Exception as exc:
+            message = f"iClone motion export failed: {exc}"
+            settings.iclone_export_status = message
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+        settings.iclone_last_export_path = result["fbx_path"]
+        settings.iclone_export_status = (
+            f"Exported {result['action']} ({result['frame_start']}-"
+            f"{result['frame_end']}, {result['mapped_bones']} mapped bones)"
+        )
+        self.report({'INFO'}, settings.iclone_export_status)
+        return {'FINISHED'}
 
 
 # ---------------------------------------------------------------------------
@@ -1042,8 +1544,8 @@ class KIMODO_OT_GenerateSegment(Operator):
         if not (0 <= idx < len(s.motion_segments)):
             self.report({'ERROR'}, "No segment selected.")
             return {'CANCELLED'}
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not sc.is_ready():
+            self.report({'WARNING'}, "Kimodo is not ready — wait for startup or click 'Start Kimodo'.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -1216,8 +1718,8 @@ class KIMODO_OT_GenerateAllSegments(Operator):
 
     def invoke(self, context, event):
         s = context.scene.kimodo
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not sc.is_ready():
+            self.report({'WARNING'}, "Kimodo is not ready — wait for startup or click 'Start Kimodo'.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating.")
@@ -1248,6 +1750,11 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         # Resolve seeds for all segments
         seeds = [random.randint(0, 2**31 - 1) if seg.seed_mode == 'RANDOM' else seg.seed
                  for _, seg in ordered]
+        if s.kimodo_model == "Kimodo-SOMA-RP-v1.1":
+            # Kimodo v1.1 uses one process-wide seed for a multi-prompt call.
+            seeds = [seeds[0]] * len(seeds)
+            self.report({'INFO'},
+                        "Kimodo v1.1 uses one seed for the full multi-segment sequence.")
         seed = seeds[0]
         self._resolved_seed = seed
         self._resolved_seeds = list(seeds)
@@ -1655,6 +2162,7 @@ class KIMODO_OT_AddConstraint(Operator):
     """Add a Kimodo motion constraint marker at the 3D cursor"""
     bl_idname = "kimodo.add_constraint"
     bl_label = "Add Constraint Marker"
+    bl_options = {'REGISTER', 'UNDO'}
 
     constraint_type: bpy.props.StringProperty(default='root2d')
 
@@ -1665,10 +2173,9 @@ class KIMODO_OT_AddConstraint(Operator):
         active = context.active_object
 
         # ---------------------------------------------------------------
-        # fullbody needs an armature, not an Empty.
-        # Priority: (1) active object is an armature → use it directly
-        #           (2) source_armature exists → duplicate it as a reference
-        #           (3) no armature available → create Empty but warn loudly
+        # fullbody needs a frozen armature pose, not an animated source or an
+        # Empty. The selected/source armature is always duplicated below; the
+        # original animation remains untouched.
         # ---------------------------------------------------------------
         if ctype == 'fullbody':
             marker_obj = self._resolve_fullbody_armature(context, s, cur_frame)
@@ -1691,113 +2198,141 @@ class KIMODO_OT_AddConstraint(Operator):
     # ------------------------------------------------------------------
 
     def _resolve_fullbody_armature(self, context, s, cur_frame):
-        """
-        Return the armature object to use for a fullbody constraint.
-
-        Logic:
-        - Case 1: an armature is selected AND active is an armature → use active armature
-        - Case 2: no armature in the selection set → duplicate source_armature for posing
-        - Case 3: otherwise → error
-        """
+        """Choose a source and return a frozen pose-reference duplicate."""
         active = context.active_object
-        has_selected_armature = any(obj.type == 'ARMATURE' for obj in context.selected_objects)
+        selected_armatures = [
+            obj for obj in context.selected_objects
+            if obj.type == 'ARMATURE' and not obj.get("kimodo_constraint")
+        ]
 
-        # Case 1: an armature is selected and active is an armature → use active as-is
-        if has_selected_armature and active and active.type == 'ARMATURE':
-            self.report({'INFO'},
-                f"Using selected armature '{active.name}' as full-body pose reference. "
-                f"Pose it at frame {cur_frame} to define the keyframe.")
-            return active
+        if active and active.type == 'ARMATURE' and active in selected_armatures:
+            source = active
+        elif len(selected_armatures) == 1:
+            source = selected_armatures[0]
+        elif len(selected_armatures) > 1:
+            self.report({'ERROR'},
+                        "Multiple armatures are selected. Make the intended pose source active.")
+            return None
+        elif s.source_armature and s.source_armature.type == 'ARMATURE':
+            source = s.source_armature
+        else:
+            self.report({'ERROR'},
+                        "Full-Body needs an armature. Select one, or generate a motion first.")
+            return None
 
-        # Case 2: no armature selected at all → duplicate source_armature for posing
-        if not has_selected_armature and s.source_armature:
-            return self._duplicate_source_for_posing(context, s, cur_frame)
+        return self._duplicate_armature_for_posing(context, source, cur_frame)
 
-        # Case 3: nothing to work with
-        self.report({'ERROR'},
-            "Full-Body constraint needs an armature. "
-            "Either: (a) select an armature first, or "
-            "(b) generate a motion first so a source armature exists to duplicate.")
-        return None
-        
-    def _duplicate_source_for_posing(self, context, s, cur_frame):
-        """Duplicate source_armature and freeze its pose at cur_frame.
+    def _duplicate_armature_for_posing(self, context, source, cur_frame):
+        """Create a clean armature and freeze ``source`` at ``cur_frame``.
 
-        Plain duplication inherits the source's BVH F-curves, so any bone the
-        user rotates without explicitly keyframing gets reverted to the
-        animated value the next time the depsgraph evaluates the frame —
-        including during build_constraints_json, which silently undoes the
-        user's posing.
-
-        Fix: evaluate the source at cur_frame, copy that pose into the
-        duplicate, then strip the duplicate's animation_data so its bone
-        properties stick until the user changes them.
+        The pose reference must remain unchanged when the timeline moves. In
+        addition to Action/NLA data, it must not inherit drivers, parents,
+        object/bone constraints, modifiers, or source-only custom properties.
+        The source object and every source animation datablock remain untouched.
         """
         scene = context.scene
         saved_frame = scene.frame_current
-        scene.frame_set(cur_frame)
-        context.view_layer.update()
+        pose_ref = None
+        armature_data = None
 
-        bpy.ops.object.select_all(action='DESELECT')
-        s.source_armature.select_set(True)
-        context.view_layer.objects.active = s.source_armature
-        bpy.ops.object.duplicate(linked=False)
-        dup = context.active_object
+        try:
+            scene.frame_set(cur_frame)
+            context.view_layer.update()
 
-        # Make sure the duplicate's pose reflects the source's frame-N state
-        # before we strip animation data.
-        context.view_layer.update()
+            # Sample the evaluated object so parent/object constraints, Action,
+            # NLA, drivers and pose constraints are all baked into one result.
+            depsgraph = context.evaluated_depsgraph_get()
+            evaluated = source.evaluated_get(depsgraph)
+            world_snapshot = evaluated.matrix_world.copy()
+            pose_snapshot = {
+                pb.name: pb.matrix.copy()
+                for pb in evaluated.pose.bones
+            }
+            rotation_modes = {
+                pb.name: pb.rotation_mode
+                for pb in source.pose.bones
+            }
 
-        # Snapshot every pose bone's transform so we can re-apply after the
-        # animation_data wipe (clearing the action can otherwise reset values).
-        pose_snapshot = {}
-        for pb in dup.pose.bones:
-            pose_snapshot[pb.name] = (
-                pb.rotation_mode,
-                pb.location.copy(),
-                pb.rotation_quaternion.copy(),
-                pb.rotation_euler.copy(),
-                tuple(pb.rotation_axis_angle),
-                pb.scale.copy(),
-            )
+            # A fresh Object avoids copying source animation, constraints,
+            # modifiers and custom properties in the first place. Only the
+            # rest skeleton is copied so the reference is fully independent.
+            name = _unique_name(f"Kimodo_PoseRef_{cur_frame:04d}")
+            armature_data = source.data.copy()
+            armature_data.name = name + "_data"
+            armature_data.pose_position = 'POSE'
+            if armature_data.animation_data:
+                armature_data.animation_data_clear()
 
-        # Strip both the object-level action (root motion / object xform) and
-        # any data-level action (rare for BVH but possible). After this, the
-        # bone properties are no longer overwritten on frame change.
-        if dup.animation_data:
-            dup.animation_data_clear()
-        if dup.data.animation_data:
-            dup.data.animation_data_clear()
+            pose_ref = bpy.data.objects.new(name, armature_data)
+            target_collection = context.collection or scene.collection
+            try:
+                target_collection.objects.link(pose_ref)
+            except RuntimeError:
+                scene.collection.objects.link(pose_ref)
 
-        # Re-apply the snapshot to lock the pose in place.
-        for pb in dup.pose.bones:
-            snap = pose_snapshot.get(pb.name)
-            if snap is None:
-                continue
-            mode, loc, qrot, erot, aarot, sc = snap
-            pb.rotation_mode = mode
-            pb.location = loc
-            pb.rotation_quaternion = qrot
-            pb.rotation_euler = erot
-            pb.rotation_axis_angle = aarot
-            pb.scale = sc
+            pose_ref.matrix_world = world_snapshot
+            pose_ref.show_in_front = source.show_in_front
+            context.view_layer.update()
 
-        name = _unique_name(f"Kimodo_PoseRef_{cur_frame:04d}")
-        dup.name = name
-        dup.data.name = name + "_data"
-        # Visually distinguish — semi-transparent orange tint.
-        dup.color = (0.9, 0.5, 0.1, 0.7)
-        dup["kimodo_constraint"] = True
-        dup["kimodo_type"] = 'fullbody'
-        dup.show_name = True
+            # Apply parents before children so every stored armature-space
+            # matrix survives hierarchy evaluation exactly.
+            def pose_depth(pose_bone):
+                depth = 0
+                parent = pose_bone.parent
+                while parent is not None:
+                    depth += 1
+                    parent = parent.parent
+                return depth
 
-        scene.frame_set(saved_frame)
-        context.view_layer.update()
+            for pb in sorted(pose_ref.pose.bones, key=pose_depth):
+                matrix = pose_snapshot.get(pb.name)
+                if matrix is None:
+                    continue
+                pb.rotation_mode = rotation_modes.get(pb.name, pb.rotation_mode)
+                data_bone = pose_ref.data.bones[pb.name]
+                if data_bone.parent is None:
+                    basis = data_bone.convert_local_to_pose(
+                        matrix,
+                        data_bone.matrix_local,
+                        invert=True,
+                    )
+                else:
+                    basis = data_bone.convert_local_to_pose(
+                        matrix,
+                        data_bone.matrix_local,
+                        parent_matrix=pose_snapshot[data_bone.parent.name],
+                        parent_matrix_local=data_bone.parent.matrix_local,
+                        invert=True,
+                    )
+                pb.matrix_basis = basis
+
+            # Visually distinguish the static reference and expose it for
+            # immediate Pose Mode editing.
+            pose_ref.color = (0.9, 0.5, 0.1, 0.7)
+            pose_ref["kimodo_constraint"] = True
+            pose_ref["kimodo_type"] = 'fullbody'
+            pose_ref.show_name = True
+
+            bpy.ops.object.select_all(action='DESELECT')
+            pose_ref.select_set(True)
+            context.view_layer.objects.active = pose_ref
+            context.view_layer.update()
+
+        except Exception as exc:
+            if pose_ref is not None:
+                bpy.data.objects.remove(pose_ref, do_unlink=True)
+            if armature_data is not None and armature_data.users == 0:
+                bpy.data.armatures.remove(armature_data)
+            self.report({'ERROR'}, f"Failed to create Full-Body pose reference: {exc}")
+            return None
+        finally:
+            scene.frame_set(saved_frame)
+            context.view_layer.update()
 
         self.report({'INFO'},
-            f"Duplicated source armature as '{name}', frozen at frame {cur_frame}. "
-            f"Enter Pose Mode and tweak — changes will stick (no F-curves to fight).")
-        return dup
+            f"Created '{name}' from '{source.name}', frozen at frame {cur_frame}. "
+            "Enter Pose Mode and tweak it; the source animation is unchanged.")
+        return pose_ref
 
     def _create_empty(self, context, ctype, cur_frame):
         """Create a colour-coded Empty for non-fullbody constraint types."""
@@ -2074,8 +2609,8 @@ class KIMODO_OT_GenerateVariations(Operator):
     def invoke(self, context, event):
         s = context.scene.kimodo
 
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not sc.is_ready():
+            self.report({'WARNING'}, "Kimodo is not ready — wait for startup or click 'Start Kimodo'.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -2235,6 +2770,11 @@ _classes = [
     KIMODO_OT_ApplyRetargeting,
     KIMODO_OT_RemoveRetargeting,
     KIMODO_OT_BakeRetargeting,
+    KIMODO_OT_CheckICloneReceiver,
+    KIMODO_OT_RefreshICloneTargets,
+    KIMODO_OT_SetICloneTarget,
+    KIMODO_OT_SendMotionToIClone,
+    KIMODO_OT_ExportICloneMotion,
     KIMODO_OT_SavePreset,
     KIMODO_OT_LoadPreset,
     KIMODO_OT_DeletePreset,
